@@ -1,0 +1,438 @@
+
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: userId
+    // Fields:
+    //   - matricula: string (required) - Officer ID number
+    //   - nome: string (required) - Officer name
+    //   - senha: string (required) - Officer password
+    //   - role: string (required, enum: ['ADMIN', 'OPERATOR', 'MASTER']) - Officer role
+    //   - primeiro_acesso: bool (optional) - Whether the officer has completed their first access
+    //   - ord: int (optional) - Order for display
+    //   - created_at: timestamp (optional) - Creation timestamp
+    //
+    // Collection: individuals
+    // Document ID: individualId
+    // Fields:
+    //   - nome: string (required) - Full name
+    //   - alcunha: string (optional) - Nickname
+    //   - documento: string (optional) - ID document number
+    //   - data_nascimento: string (optional, format: date) - Birth date
+    //   - mae: string (optional) - Mother's name
+    //   - endereco: string (optional) - Address
+    //   - faccao: string (optional) - Criminal faction affiliation
+    //   - observacao: string (optional) - General observations
+    //   - created_at: timestamp (optional) - Creation timestamp
+    //   - updated_at: timestamp (optional) - Last update timestamp
+    //
+    // Collection: individual_photos
+    // Document ID: photoId
+    // Fields:
+    //   - individuo_id: string (required) - Reference to the individual
+    //   - path: string (required) - Storage path or URL
+    //   - is_primary: bool (optional) - Whether this is the main photo
+    //   - sort_order: int (optional) - Order for display
+    //   - created_by: string (optional) - User who uploaded the photo
+    //   - created_at: timestamp (optional) - Creation timestamp
+    //
+    // Collection: approaches
+    // Document ID: approachId
+    // Fields:
+    //   - data: string (required, format: date) - Date of the approach
+    //   - horario: string (required) - Time of the approach
+    //   - local: string (required) - Location of the approach
+    //   - relatorio: string (optional) - Detailed report
+    //   - objetos_apreendidos: string (optional) - Items seized
+    //   - resultado: string (optional) - Outcome of the approach
+    //   - individuo_nome: string (optional) - Name of the individual approached
+    //   - individuo_id: string (optional) - Reference to the individual record
+    //   - foto_path: string (optional) - Path to a photo of the approach
+    //   - created_at: timestamp (optional) - Creation timestamp
+    //
+    // Collection: vtr_services
+    // Document ID: serviceId
+    // Fields:
+    //   - comandante: string (required) - Commander name
+    //   - motorista: string (required) - Driver name
+    //   - patrulheiro_1: string (optional) - Patrol officer 1
+    //   - patrulheiro_2: string (optional) - Patrol officer 2
+    //   - horario_inicio: timestamp (optional) - Start time
+    //   - horario_fim: timestamp (optional) - End time
+    //   - criado_por: string (optional) - User ID who started the service
+    //   - encerrado_por_nome: string (optional) - User name who ended the service
+    //   - status: string (required, enum: ['ATIVO', 'ENCERRADO']) - Service status
+    //
+    // Collection: occurrences
+    // Document ID: occurrenceId
+    // Fields:
+    //   - nr_ss: string (required, 10 digits)
+    //   - tipo_ss: string (required, enum: ['Rondas', 'Policiamento em evento', 'Policiamento Medidas Protetivas', 'Atendimento de Chamada'])
+    //   - gu_servico: list (required, strings)
+    //   - unidade: string (optional)
+    //   - criado_por: string (required)
+    //   - created_at: string (required, format: date-time)
+    //
+    // Collection: occurrences_ro
+    // Document ID: occurrenceId
+    // Fields:
+    //   - nr_ro: string (required)
+    //   - fato: string (required)
+    //   - unidade: string (optional)
+    //   - criado_por: string (required)
+    //   - created_at: string (required, format: date-time)
+    //
+    // Collection: units
+    // Document ID: unitId
+    // Fields:
+    //   - nome: string (required) - Unit name
+    //   - created_at: timestamp (optional) - Creation timestamp
+    //   - enabled_features: list (optional) - List of enabled dashboard features
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserDoc() {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)) ? get(/databases/$(database)/documents/users/$(request.auth.uid)).data : null;
+    }
+
+    function isMaster() {
+      let doc = getUserDoc();
+      return isAuthenticated() && doc != null && 'role' in doc && doc.role == 'MASTER';
+    }
+
+    function isAdmin() {
+      let doc = getUserDoc();
+      let hasAdminRole = doc != null && 'role' in doc && (doc.role == 'ADMIN' || doc.role == 'SUPERVISOR_DE_OPERACOES');
+      let isGmailAdmin = request.auth != null && request.auth.token != null && 'email' in request.auth.token && request.auth.token.email == "allanjonesms@gmail.com";
+      return isAuthenticated() && (isMaster() || hasAdminRole || isGmailAdmin);
+    }
+
+    function isForcaTatica() {
+      let doc = getUserDoc();
+      return isAuthenticated() && doc != null && (
+        ('unidade' in doc && doc.unidade == 'FORÇA TÁTICA') || 
+        ('unidades_extras' in doc && 'FORÇA TÁTICA' in doc.unidades_extras)
+      );
+    }
+
+    function getUserUnidade() {
+      let doc = getUserDoc();
+      return (isAuthenticated() && doc != null && 'unidade' in doc) ? doc.unidade : '';
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource != null && request.resource.data != null && request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource != null && request.resource.data != null && request.resource.data.keys().hasOnly(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return hasOnlyAllowedFields(['matricula', 'nome', 'senha', 'role', 'primeiro_acesso', 'ord', 'created_at', 'unidade', 'unidades_extras']) &&
+             data.matricula is string && data.matricula.size() > 0 &&
+             data.nome is string && data.nome.size() > 0 &&
+             data.senha is string && data.senha.size() >= 5 &&
+             data.role in ['ADMIN', 'OPERATOR', 'MASTER', 'CHEFE_DE_EQUIPE', 'PATRULHEIRO', 'SUPERVISOR_DE_OPERACOES'] &&
+             (data.primeiro_acesso is bool) &&
+             (data.ord is int) &&
+             (data.created_at is timestamp) &&
+             (!('unidade' in data) || data.unidade is string) &&
+             (!('unidades_extras' in data) || data.unidades_extras is list);
+    }
+
+    function isValidUnit(data) {
+      return hasOnlyAllowedFields(['nome', 'created_at', 'enabled_features']) &&
+             data.nome is string && data.nome.size() > 0 &&
+             (!('enabled_features' in data) || data.enabled_features is list);
+    }
+
+    function isValidIndividual(data) {
+      return hasOnlyAllowedFields(['nome', 'alcunha', 'documento', 'data_nascimento', 'mae', 'endereco', 'faccao', 'observacao', 'unidade', 'cidade', 'created_at', 'updated_at', 'criado_por']) &&
+             data.nome is string && data.nome.size() > 0 && data.nome.size() < 200 &&
+             (!('unidade' in data) || data.unidade is string) &&
+             (!('cidade' in data) || data.cidade is string);
+    }
+
+    function isValidPhoto(data) {
+      return hasOnlyAllowedFields(['individuo_id', 'path', 'is_primary', 'sort_order', 'created_by', 'created_at']) &&
+             data.individuo_id is string && data.path is string;
+    }
+
+    function isValidRelationship(data) {
+      return hasOnlyAllowedFields(['individuo_id', 'relacionado_id', 'tipo', 'created_by', 'created_at']) &&
+             data.individuo_id is string && data.relacionado_id is string &&
+             data.tipo in ['COMPARSA', 'FAMILIAR'];
+    }
+
+    function isValidAttachment(data) {
+      return hasOnlyAllowedFields(['individuo_id', 'nome_arquivo', 'tipo_mime', 'path', 'legenda', 'created_by', 'created_at']) &&
+             data.individuo_id is string && data.nome_arquivo is string && data.path is string;
+    }
+
+    function isValidApproach(data) {
+      return hasOnlyAllowedFields(['data', 'horario', 'local', 'relatorio', 'objetos_apreendidos', 'resultado', 'individuo_nome', 'individuo_id', 'foto_path', 'unidade', 'criado_por', 'created_at', 'updated_at', 'is_saw']) &&
+             data.data is string && data.horario is string && data.local is string &&
+             (!('is_saw' in data) || data.is_saw is bool);
+    }
+
+    function isValidVtrService(data) {
+      return hasOnlyAllowedFields(['comandante', 'motorista', 'patrulheiro_1', 'patrulheiro_2', 'horario_inicio', 'horario_fim', 'criado_por', 'encerrado_por_nome', 'status', 'unidade']) &&
+             data.comandante is string && data.motorista is string && data.status in ['ATIVO', 'ENCERRADO'];
+    }
+
+    function isValidOccurrenceSS(data) {
+      return hasOnlyAllowedFields(['nr_ss', 'tipo_ss', 'gu_servico', 'unidade', 'criado_por', 'created_at', 'cidade', 'date', 'time', 'facts', 'personnel', 'eventoComunicado', 'roAddress', 'updated_at', 'created_by']) &&
+             data.nr_ss is string && data.nr_ss.matches("^\\d{10}$") &&
+             data.tipo_ss in ['Rondas', 'Policiamento em evento', 'Policiamento Medidas Protetivas', 'Atendimento de Chamada'] &&
+             data.gu_servico is list && data.criado_por is string && data.created_at is string;
+    }
+
+    function isValidOccurrenceRO(data) {
+      return hasOnlyAllowedFields(['nr_ro', 'fato', 'unidade', 'criado_por', 'created_at', 'roData', 'roAddress', 'cidade', 'date', 'time', 'facts', 'personnel', 'eventoComunicado', 'updated_at', 'created_by']) &&
+             data.nr_ro is string && data.fato is string && data.criado_por is string && data.created_at is string;
+    }
+
+    function isValidConfidentialInfo(data) {
+      return hasOnlyAllowedFields(['individuo_id', 'conteudo', 'operador_nome', 'operador_id', 'created_at']) &&
+             data.individuo_id is string && data.conteudo is string && data.conteudo.size() > 0 &&
+             data.operador_nome is string && data.operador_id is string && data.created_at is string;
+    }
+
+    function isValidCrimeGroup(data) {
+      return hasOnlyAllowedFields(['nome', 'cidade', 'tipo', 'created_at', 'updated_at']) &&
+             data.nome is string && data.cidade is string && data.tipo in ['DROGAS', 'ARMAS', 'ROUBOS'] &&
+             data.created_at is string && data.updated_at is string;
+    }
+
+    function isValidCrimeMember(data) {
+      return hasOnlyAllowedFields(['group_id', 'individual_id', 'role', 'parent_id', 'drugs', 'funcao_especifica', 'created_at']) &&
+             data.group_id is string && data.individual_id is string &&
+             data.role in ['DISTRIBUIDOR', 'BOCA_DE_FUMO', 'VAPOR', 'USUARIO'] &&
+             (!('drugs' in data) || data.drugs is list) &&
+             data.created_at is string;
+    }
+
+    function isValidParteDiaria(data) {
+      return hasOnlyAllowedFields(['nr_parte', 'data_selecionada', 'intervalo_data', 'unidade', 'graduado_anterior', 'graduado_atual', 'pessoal_servico', 'pessoal_civil', 'servico_saude', 'material_carga', 'instalacoes', 'apresentacao_pracas', 'presos_detidos', 'viaturas_disponiveis', 'ocorrencias_transito', 'ocorrencias_policiais', 'diversos', 'criado_por_id', 'criado_por_nome', 'created_at', 'id', 'status', 'assinatura', 'resumo_acoes']) &&
+             data.nr_parte is int && data.data_selecionada is string && data.unidade is string &&
+             data.graduado_anterior is string && data.graduado_atual is string &&
+             (!('status' in data) || data.status in ['ABERTA', 'ENCERRADA']) &&
+             (!('resumo_acoes' in data) || data.resumo_acoes is string) &&
+             (!('assinatura' in data) || data.assinatura is map);
+    }
+
+    function isValidDailyAction(data) {
+      return hasOnlyAllowedFields(['id', 'categoria', 'tipo_acao', 'unidade', 'vtr_service_id', 'equipe_detalhes', 'criado_por_id', 'criado_por_nome', 'quantidade', 'detalhes', 'created_at', 'data_selecionada']) &&
+             data.categoria is string && data.tipo_acao is string && data.unidade is string &&
+             data.criado_por_id is string && data.criado_por_nome is string &&
+             data.quantidade is int && data.detalhes is string && data.created_at is string && data.data_selecionada is string &&
+             (!('vtr_service_id' in data) || data.vtr_service_id is string) &&
+             (!('equipe_detalhes' in data) || data.equipe_detalhes is string);
+    }
+
+    function isValidOccurrenceTemplate(data) {
+      return hasOnlyAllowedFields(['id', 'label', 'defaultNature', 'structure', 'referenceModel', 'referenceModels', 'stepRegexes', 'stepSuggestions', 'presetData']) &&
+             data.id is string && data.label is string && data.defaultNature is string &&
+             data.structure is list && data.referenceModel is string &&
+             (!('referenceModels' in data) || data.referenceModels is list) &&
+             (!('stepRegexes' in data) || data.stepRegexes is list) &&
+             (!('stepSuggestions' in data) || data.stepSuggestions is list) &&
+             (!('presetData' in data) || data.presetData is map);
+    }
+
+    function isValidSystemVersion(data) {
+      return hasOnlyAllowedFields(['version', 'type', 'description', 'date', 'created_at']) &&
+             data.version is string && data.type is string && data.description is string && data.date is string &&
+             (!('created_at' in data) || data.created_at is string);
+    }
+
+    function isValidRequerimento(data) {
+      return data.matricula is string && data.nome_operador is string &&
+             data.tipo is string && data.descricao is string && data.status is string &&
+             data.created_by is string;
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read, write: if true;
+    }
+
+    match /requerimentos/{requerimentoId} {
+      allow read: if isAuthenticated() && (isAdmin() || isMaster() || resource.data.created_by == request.auth.uid);
+      allow create: if isAuthenticated() && isValidRequerimento(request.resource.data) && (request.resource.data.created_by == request.auth.uid || isAdmin() || isMaster()) && request.resource.data.status == 'PENDENTE';
+      allow update: if isAuthenticated() && isValidRequerimento(request.resource.data) && (
+        (isAdmin() || isMaster()) ||
+        (resource.data.created_by == request.auth.uid && resource.data.status == 'PENDENTE' && request.resource.data.status == 'PENDENTE' && !('resposta_admin' in request.resource.data))
+      );
+      allow delete: if isAuthenticated() && (isAdmin() || isMaster() || (resource.data.created_by == request.auth.uid && resource.data.status == 'PENDENTE'));
+    }
+
+    match /individuals/{individualId} {
+      allow read: if isAuthenticated() && (isAdmin() || isMaster() || isForcaTatica() || resource.data.unidade == getUserUnidade());
+      allow create: if isAuthenticated() && isValidIndividual(request.resource.data) && (isAdmin() || isMaster() || isForcaTatica() || request.resource.data.unidade == getUserUnidade());
+      allow update: if isAuthenticated() && (isAdmin() || isMaster() || isForcaTatica() || resource.data.unidade == getUserUnidade()) && isValidIndividual(request.resource.data) && (isAdmin() || isMaster() || isForcaTatica() || request.resource.data.unidade == resource.data.unidade);
+      allow delete: if isAdmin() || isMaster();
+    }
+
+    match /individual_photos/{photoId} {
+      allow read: if isAuthenticated() && (isAdmin() || isMaster() || true); // Allow all authenticated users to read photos, but ADMIN/MASTER have full access
+      allow create: if isAuthenticated() && isValidPhoto(request.resource.data);
+      allow update: if isAuthenticated() && isValidPhoto(request.resource.data);
+      allow delete: if isAdmin() || isMaster();
+    }
+
+    match /individual_relationships/{relationshipId} {
+      allow read: if isAuthenticated() && (isAdmin() || isMaster() || true);
+      allow create: if isAuthenticated() && isValidRelationship(request.resource.data);
+      allow update: if isAuthenticated() && isValidRelationship(request.resource.data);
+      allow delete: if isAdmin() || isMaster();
+    }
+
+    match /individual_attachments/{attachmentId} {
+      allow read: if isAuthenticated() && (isAdmin() || isMaster() || true);
+      allow create: if isAuthenticated() && isValidAttachment(request.resource.data);
+      allow update: if isAuthenticated() && isValidAttachment(request.resource.data);
+      allow delete: if isAdmin() || isMaster();
+    }
+
+    match /approaches/{approachId} {
+      allow read: if isAuthenticated() && (isAdmin() || isMaster() || isForcaTatica() || resource.data.unidade == getUserUnidade());
+      allow create: if isAuthenticated() && isValidApproach(request.resource.data) && (isAdmin() || isMaster() || isForcaTatica() || request.resource.data.unidade == getUserUnidade());
+      allow update: if isAuthenticated() && (isAdmin() || isMaster() || isForcaTatica() || (resource.data.criado_por == request.auth.uid && resource.data.unidade == getUserUnidade())) && isValidApproach(request.resource.data) && (isAdmin() || isMaster() || isForcaTatica() || request.resource.data.unidade == resource.data.unidade);
+      allow delete: if isAdmin() || isMaster();
+    }
+
+    match /confidential_info/{infoId} {
+      allow read: if isAuthenticated() && (isAdmin() || isForcaTatica());
+      allow create: if isAuthenticated() && (isAdmin() || isForcaTatica()) && isValidConfidentialInfo(request.resource.data);
+      allow update: if false; // Historical records should not be updated
+      allow delete: if isAdmin();
+    }
+
+    match /vtr_services/{serviceId} {
+      allow read: if isAuthenticated() && (isAdmin() || resource.data.unidade == getUserUnidade());
+      allow create: if isAuthenticated() && isValidVtrService(request.resource.data) && (isAdmin() || request.resource.data.unidade == getUserUnidade());
+      allow update: if isAuthenticated() && (isAdmin() || resource.data.unidade == getUserUnidade()) && isValidVtrService(request.resource.data) && (isAdmin() || request.resource.data.unidade == resource.data.unidade);
+      allow delete: if isAdmin();
+    }
+
+    match /occurrences/{occurrenceId} {
+      allow read: if isAuthenticated() && (isAdmin() || resource.data.unidade == getUserUnidade());
+      allow create: if isAuthenticated() && isValidOccurrenceSS(request.resource.data) && (isAdmin() || request.resource.data.unidade == getUserUnidade());
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /occurrences_ro/{occurrenceId} {
+      allow read: if isAuthenticated() && (isAdmin() || resource.data.unidade == getUserUnidade());
+      allow create: if isAuthenticated() && isValidOccurrenceRO(request.resource.data) && (isAdmin() || request.resource.data.unidade == getUserUnidade());
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    match /units/{unitId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() && isValidUnit(request.resource.data);
+    }
+
+    match /logs/{logId} {
+      allow read: if isAdmin();
+      allow create: if isAuthenticated();
+    }
+
+    match /crime_groups/{groupId} {
+      allow read: if isAuthenticated() && isMaster();
+      allow write: if isAuthenticated() && isMaster() && isValidCrimeGroup(request.resource.data);
+    }
+
+    match /crime_members/{memberId} {
+      allow read: if isAuthenticated() && isMaster();
+      allow write: if isAuthenticated() && isMaster() && isValidCrimeMember(request.resource.data);
+    }
+
+    match /parte_diaria/{docId} {
+      allow read: if isAuthenticated() && (isAdmin() || isMaster() || resource.data.unidade == getUserUnidade());
+      allow create: if isAuthenticated() && isValidParteDiaria(request.resource.data) && (isAdmin() || isMaster() || request.resource.data.unidade == getUserUnidade());
+      allow update: if isAuthenticated() && (isAdmin() || isMaster() || resource.data.unidade == getUserUnidade()) && isValidParteDiaria(request.resource.data) && (isAdmin() || isMaster() || request.resource.data.unidade == resource.data.unidade);
+      allow delete: if isAdmin() || isMaster();
+    }
+
+    match /daily_actions/{actionId} {
+      allow read: if isAuthenticated() && (isAdmin() || isMaster() || resource.data.unidade == getUserUnidade());
+      allow create: if isAuthenticated() && isValidDailyAction(request.resource.data) && (isAdmin() || isMaster() || request.resource.data.unidade == getUserUnidade());
+      allow update: if isAuthenticated() && (isAdmin() || isMaster() || resource.data.unidade == getUserUnidade()) && isValidDailyAction(request.resource.data) && (isAdmin() || isMaster() || request.resource.data.unidade == resource.data.unidade);
+      allow delete: if isAdmin() || isMaster();
+    }
+
+    match /vehicles/{vehicleId} {
+      allow read, write: if isAuthenticated();
+    }
+
+    match /ro_templates/{templateId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && (isMaster() || isAdmin()) && isValidOccurrenceTemplate(request.resource.data);
+      allow delete: if isAuthenticated() && (isMaster() || isAdmin());
+    }
+
+    match /system_versions/{versionId} {
+      allow read: if isAuthenticated();
+      allow create, update: if isAuthenticated() && (isMaster() || isAdmin()) && isValidSystemVersion(request.resource.data);
+      allow delete: if isAuthenticated() && (isMaster() || isAdmin());
+    }
+
+    match /requerimento_configs/{configId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && (isMaster() || isAdmin());
+    }
+
+    match /voluntarios_escala/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && (isMaster() || isAdmin());
+    }
+
+    match /postos_remunerados/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && (isMaster() || isAdmin());
+    }
+
+    match /escalas_remuneradas/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && (isMaster() || isAdmin());
+    }
+
+    match /formatura_presencas/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
