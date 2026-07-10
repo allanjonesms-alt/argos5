@@ -514,6 +514,32 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
     });
   }, [usersList, searchTerm, selectedUnit, selectedRank, selectedStatus, activeDutyMap]);
 
+  // Group by unit
+  const groupedUsers = useMemo(() => {
+    const groups: Record<string, User[]> = {};
+    
+    filteredUsers.forEach(u => {
+      const unit = u.unidade?.toUpperCase() || 'SEM UNIDADE';
+      if (!groups[unit]) groups[unit] = [];
+      groups[unit].push(u);
+    });
+
+    const sortedGroups = Object.keys(groups).sort((a, b) => {
+      const aIs5BPM = a.includes('5º BPM') || a.includes('5° BPM') || a === '5BPM' || a === '5 BPM';
+      const bIs5BPM = b.includes('5º BPM') || b.includes('5° BPM') || b === '5BPM' || b === '5 BPM';
+      
+      if (aIs5BPM && !bIs5BPM) return -1;
+      if (!aIs5BPM && bIs5BPM) return 1;
+      
+      return a.localeCompare(b);
+    });
+
+    return sortedGroups.map(unitName => ({
+      unitName,
+      users: groups[unitName]
+    }));
+  }, [filteredUsers]);
+
   if (isAddingMilitar) {
     return (
       <div className="min-h-screen bg-white py-6" id="add-militar-view">
@@ -803,122 +829,135 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
           </p>
         </div>
       ) : (
-        /* Bento Grid of Officers */
-        <motion.div 
-          layout
-          className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
-          id="efetivo-grid-container"
-        >
-          <AnimatePresence mode="popLayout">
-            {filteredUsers.map(officer => {
-              const activeDuty = activeDutyMap.get(officer.id);
-              const sitFuncional = officer.situacao_funcional || 'Ativo';
-              const isLeave = sitFuncional.toUpperCase().includes('LICENÇA') || sitFuncional.toUpperCase().includes('AFASTADO') || sitFuncional.toUpperCase().includes('LICENCA') || sitFuncional.toUpperCase().includes('RESERVA') || sitFuncional.toUpperCase() === 'INATIVO';
+        /* Bento Grid of Officers Grouped by Unit */
+        <div className="flex flex-col gap-10">
+          {groupedUsers.map(group => (
+            <div key={group.unitName}>
+              <h3 className="text-xs font-black text-navy-900 uppercase tracking-widest mb-4 flex items-center gap-2 border-b border-navy-100 pb-2">
+                <Shield className="w-4 h-4 text-navy-500" />
+                {group.unitName}
+                <span className="text-[10px] font-bold bg-navy-50 text-navy-500 border border-navy-100 px-2 py-0.5 rounded-full ml-1">
+                  {group.users.length} {group.users.length === 1 ? 'policial' : 'policiais'}
+                </span>
+              </h3>
+              <motion.div 
+                layout
+                className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"
+                id={`efetivo-grid-container-${group.unitName.replace(/\W+/g, '-')}`}
+              >
+                <AnimatePresence mode="popLayout">
+                  {group.users.map(officer => {
+                    const activeDuty = activeDutyMap.get(officer.id);
+                    const sitFuncional = officer.situacao_funcional || 'Ativo';
+                    const isLeave = sitFuncional.toUpperCase().includes('LICENÇA') || sitFuncional.toUpperCase().includes('AFASTADO') || sitFuncional.toUpperCase().includes('LICENCA') || sitFuncional.toUpperCase().includes('RESERVA') || sitFuncional.toUpperCase() === 'INATIVO';
 
-              return (
-                <motion.div
-                  key={officer.id}
-                  layout
-                  initial={{ opacity: 0, y: 10 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.95 }}
-                  transition={{ duration: 0.15 }}
-                  onClick={() => {
-                    if (canManage) {
-                      setEditingUser(officer);
-                    } else {
-                      setSelectedOfficer(officer);
-                    }
-                  }}
-                  className="bg-white border border-navy-100 hover:border-navy-300 hover:shadow-md rounded-2xl p-5 transition-all flex flex-col justify-between gap-4 cursor-pointer relative overflow-hidden group shadow-sm"
-                >
-                  {/* Subtle rank watermark or background decor */}
-                  <div className="absolute right-4 bottom-2 opacity-5 pointer-events-none group-hover:opacity-10 transition-all text-navy-900">
-                    <Shield size={120} />
-                  </div>
-
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex gap-3.5 min-w-0">
-                      {/* Left Badge: Initials / Avatar / Rank visual */}
-                      <div className={`w-12 h-12 rounded-xl border flex-shrink-0 flex items-center justify-center font-black text-sm shadow-sm transition-transform group-hover:scale-105 ${
-                        activeDuty ? 'bg-green-50 border-green-200 text-green-700' :
-                        isLeave ? 'bg-amber-50 border-amber-200 text-amber-700' :
-                        'bg-navy-50 border-navy-100 text-navy-700'
-                      }`}>
-                        {officer.rank ? officer.rank.substring(0, 3).toUpperCase() : 'PM'}
-                      </div>
-
-                      {/* Info lines */}
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-1.5">
-                          <h3 className="text-navy-950 font-black text-sm uppercase truncate tracking-tight group-hover:text-navy-700 transition-colors">
-                            {officer.nome}
-                          </h3>
+                    return (
+                      <motion.div
+                        key={officer.id}
+                        layout
+                        initial={{ opacity: 0, y: 10 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, scale: 0.95 }}
+                        transition={{ duration: 0.15 }}
+                        onClick={() => {
+                          if (canManage) {
+                            setEditingUser(officer);
+                          } else {
+                            setSelectedOfficer(officer);
+                          }
+                        }}
+                        className="bg-white border border-navy-100 hover:border-navy-300 hover:shadow-md rounded-2xl p-5 transition-all flex flex-col justify-between gap-4 cursor-pointer relative overflow-hidden group shadow-sm"
+                      >
+                        {/* Subtle rank watermark or background decor */}
+                        <div className="absolute right-4 bottom-2 opacity-5 pointer-events-none group-hover:opacity-10 transition-all text-navy-900">
+                          <Shield size={120} />
                         </div>
-                        <p className="text-[10px] text-navy-400 font-bold uppercase truncate mt-0.5">
-                          {officer.nome_completo || 'Sem Nome Completo Cadastrado'}
-                        </p>
-                        
-                        <div className="flex items-center gap-2 mt-2">
-                          <span className="bg-navy-100 text-navy-700 text-[9px] font-black px-1.5 py-0.5 rounded tracking-wider">
-                            MAT: {officer.matricula}
-                          </span>
-                          {officer.unidade && (
-                            <span className="bg-[#1B325F]/10 text-[#1B325F] text-[9px] font-black px-1.5 py-0.5 rounded tracking-wider uppercase">
-                              {officer.unidade}
+
+                        <div className="flex items-start justify-between gap-4">
+                          <div className="flex gap-3.5 min-w-0">
+                            {/* Left Badge: Initials / Avatar / Rank visual */}
+                            <div className={`w-12 h-12 rounded-xl border flex-shrink-0 flex items-center justify-center font-black text-sm shadow-sm transition-transform group-hover:scale-105 ${
+                              activeDuty ? 'bg-green-50 border-green-200 text-green-700' :
+                              isLeave ? 'bg-amber-50 border-amber-200 text-amber-700' :
+                              'bg-navy-50 border-navy-100 text-navy-700'
+                            }`}>
+                              {officer.rank ? officer.rank.substring(0, 3).toUpperCase() : 'PM'}
+                            </div>
+
+                            {/* Info lines */}
+                            <div className="min-w-0">
+                              <div className="flex flex-wrap items-center gap-1.5">
+                                <h3 className="text-navy-950 font-black text-sm uppercase truncate tracking-tight group-hover:text-navy-700 transition-colors">
+                                  {officer.nome}
+                                </h3>
+                              </div>
+                              <p className="text-[10px] text-navy-400 font-bold uppercase truncate mt-0.5">
+                                {officer.nome_completo || 'Sem Nome Completo Cadastrado'}
+                              </p>
+                              
+                              <div className="flex items-center gap-2 mt-2">
+                                <span className="bg-navy-100 text-navy-700 text-[9px] font-black px-1.5 py-0.5 rounded tracking-wider">
+                                  MAT: {officer.matricula}
+                                </span>
+                                {officer.unidade && (
+                                  <span className="bg-[#1B325F]/10 text-[#1B325F] text-[9px] font-black px-1.5 py-0.5 rounded tracking-wider uppercase">
+                                    {officer.unidade}
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Status Block */}
+                        <div className="border-t border-navy-50 pt-3 mt-1 flex items-center justify-between">
+                          <div>
+                            <span className="text-[8px] font-black uppercase text-navy-400 tracking-widest block">
+                              Situação Funcional
                             </span>
-                          )}
+                            <span className={`text-[10px] font-black uppercase mt-0.5 inline-block ${
+                              isLeave ? 'text-amber-600' : 'text-navy-700'
+                            }`}>
+                              {sitFuncional.toUpperCase()}
+                            </span>
+                          </div>
+
+                          <div className="text-right">
+                            <span className="text-[8px] font-black uppercase text-navy-400 tracking-widest block">
+                              Status de Serviço
+                            </span>
+                            {activeDuty ? (
+                              <div className="flex items-center gap-1.5 justify-end mt-0.5">
+                                <span className="w-2 h-2 rounded-full bg-green-500 animate-ping"></span>
+                                <span className="text-[10px] font-black text-green-600 uppercase tracking-wider">
+                                  EM SERVIÇO ({activeDuty.function.toUpperCase()})
+                                </span>
+                              </div>
+                            ) : (
+                              <span className="text-[10px] font-black text-navy-500 uppercase tracking-wider mt-0.5 block">
+                                {isLeave ? 'AFASTADO' : 'DISPONÍVEL'}
+                              </span>
+                            )}
+                          </div>
                         </div>
-                      </div>
-                    </div>
-                  </div>
 
-                  {/* Status Block */}
-                  <div className="border-t border-navy-50 pt-3 mt-1 flex items-center justify-between">
-                    <div>
-                      <span className="text-[8px] font-black uppercase text-navy-400 tracking-widest block">
-                        Situação Funcional
-                      </span>
-                      <span className={`text-[10px] font-black uppercase mt-0.5 inline-block ${
-                        isLeave ? 'text-amber-600' : 'text-navy-700'
-                      }`}>
-                        {sitFuncional.toUpperCase()}
-                      </span>
-                    </div>
-
-                    <div className="text-right">
-                      <span className="text-[8px] font-black uppercase text-navy-400 tracking-widest block">
-                        Status de Serviço
-                      </span>
-                      {activeDuty ? (
-                        <div className="flex items-center gap-1.5 justify-end mt-0.5">
-                          <span className="w-2 h-2 rounded-full bg-green-500 animate-ping"></span>
-                          <span className="text-[10px] font-black text-green-600 uppercase tracking-wider">
-                            EM SERVIÇO ({activeDuty.function.toUpperCase()})
-                          </span>
-                        </div>
-                      ) : (
-                        <span className="text-[10px] font-black text-navy-500 uppercase tracking-wider mt-0.5 block">
-                          {isLeave ? 'AFASTADO' : 'DISPONÍVEL'}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-
-                  {/* Viatura overlay if on active duty */}
-                  {activeDuty && (
-                    <div className="bg-green-50/50 border border-green-100 rounded-xl p-2 text-left mt-1">
-                      <p className="text-[9px] font-bold text-green-700 uppercase flex items-center gap-1">
-                        <Activity size={10} className="animate-pulse" />
-                        <span>VTR: {activeDuty.shift.viatura_prefixo || 'S/ PREFIXO'} ({activeDuty.shift.viatura_modelo || 'S/ VIATURA'})</span>
-                      </p>
-                    </div>
-                  )}
-                </motion.div>
-              );
-            })}
-          </AnimatePresence>
-        </motion.div>
+                        {/* Viatura overlay if on active duty */}
+                        {activeDuty && (
+                          <div className="bg-green-50/50 border border-green-100 rounded-xl p-2 text-left mt-1">
+                            <p className="text-[9px] font-bold text-green-700 uppercase flex items-center gap-1">
+                              <Activity size={10} className="animate-pulse" />
+                              <span>VTR: {activeDuty.shift.viatura_prefixo || 'S/ PREFIXO'} ({activeDuty.shift.viatura_modelo || 'S/ VIATURA'})</span>
+                            </p>
+                          </div>
+                        )}
+                      </motion.div>
+                    );
+                  })}
+                </AnimatePresence>
+              </motion.div>
+            </div>
+          ))}
+        </div>
       )}
 
       {/* Dossier Modal (Ficha Individual) */}
