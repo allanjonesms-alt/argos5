@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import * as pdfjsLib from 'pdfjs-dist';
 import { 
   BCGRecord, 
   MilitarPromocao, 
@@ -28,6 +29,9 @@ import {
   Info
 } from 'lucide-react';
 
+// Configure pdfjs worker
+pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version || '5.6.205'}/build/pdf.worker.min.mjs`;
+
 interface ExtractedAlmanaqueItem {
   id: string;
   nr_classificacao: number;
@@ -49,6 +53,54 @@ interface ImportadorBCGProps {
   onApplyPromocaoSimulada: (militarId: string, novaGraduacao: GraduacaoPMMS) => Promise<void>;
 }
 
+async function extractTextFromPdf(file: File): Promise<string> {
+  const arrayBuffer = await file.arrayBuffer();
+  const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
+  const pdf = await loadingTask.promise;
+  let fullText = '';
+
+  for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const page = await pdf.getPage(pageNum);
+    const textContent = await page.getTextContent();
+    let pageText = '';
+    let lastY: number | null = null;
+
+    for (const item of textContent.items as any[]) {
+      if (!item.str || item.str.trim().length === 0) continue;
+      const currentY = item.transform ? item.transform[5] : null;
+
+      // Insert newline when vertical Y position changes significantly (new line on page)
+      if (lastY !== null && currentY !== null && Math.abs(currentY - lastY) > 3) {
+        pageText += '\n';
+      } else if (item.hasEOL) {
+        pageText += '\n';
+      } else if (pageText.length > 0 && !pageText.endsWith('\n') && !pageText.endsWith(' ')) {
+        pageText += ' ';
+      }
+
+      pageText += item.str.trim();
+      if (currentY !== null) lastY = currentY;
+    }
+
+    fullText += `--- PÁGINA ${pageNum} ---\n` + pageText + '\n\n';
+  }
+
+  return fullText;
+}
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      const base64 = result.split(',')[1] || result;
+      resolve(base64);
+    };
+    reader.onerror = (error) => reject(error);
+    reader.readAsDataURL(file);
+  });
+}
+
 export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
   bcgs,
   militares,
@@ -58,19 +110,20 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
   onSaveMilitar,
   onApplyPromocaoSimulada
 }) => {
-  const [importMode, setImportMode] = useState<'upload' | 'texto'>('texto');
+  const [importMode, setImportMode] = useState<'upload' | 'texto'>('upload');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [bcgNumeroInput, setBcgNumeroInput] = useState<string>('BCG 077/2026');
   const [bcgDataInput, setBcgDataInput] = useState<string>(new Date().toISOString().substring(0, 10));
   
   const [rawText, setRawText] = useState<string>(
 `--- PÁGINA 1 ---
-1º - Soldado - ALLAN JONES - Matrícula 484506021 - Promoção: 05/09/2022
-2º - Cabo - CARLOS ALBERTO SILVA - Matrícula 102345 - Promoção: 10/05/2020
-3º - 3º Sargento - RODRIGO MENDES FERREIRA - Matrícula 102346 - Promoção: 21/04/2021
+1º - Subtenente - AURELIO FRANCISCO DA SILVA - Matrícula 102340 - Promoção: 05/09/2019
+2º - 1º Sargento - GUSTAVO HENRIQUE SOUZA - Matrícula 087456 - Promoção: 25/12/2021
+3º - 2º Sargento - MARCOS VINICIUS PEREIRA - Matrícula 098123 - Promoção: 05/09/2021
 --- PÁGINA 2 ---
-4º - 2º Sargento - MARCOS VINICIUS PEREIRA - Matrícula 098123 - Promoção: 05/09/2021
-5º - 1º Sargento - GUSTAVO HENRIQUE SOUZA - Matrícula 087456 - Promoção: 25/12/2021`
+4º - 3º Sargento - RODRIGO MENDES FERREIRA - Matrícula 102346 - Promoção: 21/04/2021
+5º - Cabo - CARLOS ALBERTO SILVA - Matrícula 102345 - Promoção: 10/05/2020
+6º - Soldado - ALLAN JONES - Matrícula 484506021 - Promoção: 05/09/2022`
   );
 
   const [isProcessing, setIsProcessing] = useState(false);
@@ -94,7 +147,7 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
     }
   };
 
-  // Parsing function to extract Quadro de Acesso / Almanaque entries from all pages
+  // Parsing function to extract Quadro de Acesso / Almanaque entries from all pages text
   const parseBCGTextToAlmanaque = (text: string): ExtractedAlmanaqueItem[] => {
     // Filter out page headers like "--- PÁGINA 1 ---" or empty lines
     const lines = text
@@ -102,35 +155,71 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
       .map(l => l.trim())
       .filter(l => l.length > 0 && !l.toUpperCase().startsWith('--- PÁGINA') && !l.toUpperCase().startsWith('PÁGINA '));
 
-    const items: ExtractedAlmanaqueItem[] = [];
+    const rawItems: Array<{
+      docIndex: number;
+      graduacao: GraduacaoPMMS;
+      nome: string;
+      matricula: string;
+      ultima_promocao: string;
+      quadro: QuadroPMMS;
+      cadastrado_argos: boolean;
+    }> = [];
+
+    let currentRank: GraduacaoPMMS = 'Subtenente';
 
     lines.forEach((line, index) => {
-      // Extract classification number (e.g., 1º, 1 -, 1.)
-      let classNr = index + 1;
-      const matchClass = line.match(/^(\d+)[\º\ª\.\-\s]/);
-      if (matchClass) {
-        classNr = parseInt(matchClass[1], 10);
+      const upperLine = line.toUpperCase();
+
+      // Check for section headers updating currentRank
+      if (upperLine.includes('SUBTENENTE') || upperLine.includes('SUB TEN') || upperLine.includes('SUB-TEN')) {
+        currentRank = 'Subtenente';
+      } else if (upperLine.includes('1º SARGENTO') || upperLine.includes('1º SGT') || upperLine.includes('1 SARGENTO')) {
+        currentRank = '1º Sargento';
+      } else if (upperLine.includes('2º SARGENTO') || upperLine.includes('2º SGT') || upperLine.includes('2 SARGENTO')) {
+        currentRank = '2º Sargento';
+      } else if (upperLine.includes('3º SARGENTO') || upperLine.includes('3º SGT') || upperLine.includes('3 SARGENTO')) {
+        currentRank = '3º Sargento';
+      } else if (upperLine.includes('CABO') || upperLine.includes(' CB ')) {
+        currentRank = 'Cabo';
+      } else if (upperLine.includes('SOLDADO') || upperLine.includes(' SD ')) {
+        currentRank = 'Soldado';
+      } else if (upperLine.includes('CORONEL') && !upperLine.includes('TENENTE-CORONEL')) {
+        currentRank = 'Coronel';
+      } else if (upperLine.includes('TENENTE-CORONEL') || upperLine.includes('TEN-CEL')) {
+        currentRank = 'Tenente-Coronel';
+      } else if (upperLine.includes('MAJOR')) {
+        currentRank = 'Major';
+      } else if (upperLine.includes('CAPITÃO') || upperLine.includes('CAPITAO')) {
+        currentRank = 'Capitão';
+      } else if (upperLine.includes('1º TENENTE') || upperLine.includes('1º TEN')) {
+        currentRank = '1º Tenente';
+      } else if (upperLine.includes('2º TENENTE') || upperLine.includes('2º TEN')) {
+        currentRank = '2º Tenente';
       }
 
-      // Extract Graduação
-      let grad: GraduacaoPMMS = 'Soldado';
-      const upperLine = line.toUpperCase();
-      if (upperLine.includes('CORONEL') && !upperLine.includes('TENENTE-CORONEL')) grad = 'Coronel';
-      else if (upperLine.includes('TENENTE-CORONEL') || upperLine.includes('TEN-CEL')) grad = 'Tenente-Coronel';
-      else if (upperLine.includes('MAJOR')) grad = 'Major';
-      else if (upperLine.includes('CAPITÃO') || upperLine.includes('CAPITAO')) grad = 'Capitão';
-      else if (upperLine.includes('1º TENENTE') || upperLine.includes('1º TEN')) grad = '1º Tenente';
-      else if (upperLine.includes('2º TENENTE') || upperLine.includes('2º TEN')) grad = '2º Tenente';
-      else if (upperLine.includes('SUBTENENTE') || upperLine.includes('SUB TEN')) grad = 'Subtenente';
-      else if (upperLine.includes('1º SARGENTO') || upperLine.includes('1º SGT')) grad = '1º Sargento';
-      else if (upperLine.includes('2º SARGENTO') || upperLine.includes('2º SGT')) grad = '2º Sargento';
-      else if (upperLine.includes('3º SARGENTO') || upperLine.includes('3º SGT')) grad = '3º Sargento';
-      else if (upperLine.includes('CABO') || upperLine.includes('CB')) grad = 'Cabo';
-      else if (upperLine.includes('SOLDADO') || upperLine.includes('SD')) grad = 'Soldado';
+      // If line is a pure section header or document title, skip adding as a person line
+      if (upperLine.startsWith('QUADRO DE ACESSO') || upperLine.startsWith('RELAÇÃO DE') || upperLine.startsWith('ALMANAQUE') || upperLine.startsWith('BOLETIM GERAL') || upperLine.startsWith('ESTADO DE MATO GROSSO')) {
+        return;
+      }
+
+      // Extract specific rank for this line if present, else fallback to currentRank
+      let lineGrad: GraduacaoPMMS = currentRank;
+      if (upperLine.includes('CORONEL') && !upperLine.includes('TENENTE-CORONEL')) lineGrad = 'Coronel';
+      else if (upperLine.includes('TENENTE-CORONEL') || upperLine.includes('TEN-CEL')) lineGrad = 'Tenente-Coronel';
+      else if (upperLine.includes('MAJOR')) lineGrad = 'Major';
+      else if (upperLine.includes('CAPITÃO') || upperLine.includes('CAPITAO')) lineGrad = 'Capitão';
+      else if (upperLine.includes('1º TENENTE') || upperLine.includes('1º TEN')) lineGrad = '1º Tenente';
+      else if (upperLine.includes('2º TENENTE') || upperLine.includes('2º TEN')) lineGrad = '2º Tenente';
+      else if (upperLine.includes('SUBTENENTE') || upperLine.includes('SUB TEN') || upperLine.includes('SUB-TEN')) lineGrad = 'Subtenente';
+      else if (upperLine.includes('1º SARGENTO') || upperLine.includes('1º SGT')) lineGrad = '1º Sargento';
+      else if (upperLine.includes('2º SARGENTO') || upperLine.includes('2º SGT')) lineGrad = '2º Sargento';
+      else if (upperLine.includes('3º SARGENTO') || upperLine.includes('3º SGT')) lineGrad = '3º Sargento';
+      else if (upperLine.includes('CABO')) lineGrad = 'Cabo';
+      else if (upperLine.includes('SOLDADO')) lineGrad = 'Soldado';
 
       // Extract Matricula
       let mat = '';
-      const matchMat = line.match(/(?:MATRÍCULA|MATRICULA|MAT|MAT\.)\s*[:\.\-]?\s*(\d{5,12})/i) || line.match(/(\d{6,10})/);
+      const matchMat = line.match(/(?:MATRÍCULA|MATRICULA|MAT|MAT\.)\s*[:\.\-]?\s*(\d{5,12})/i) || line.match(/(\d{5,10})/);
       if (matchMat) {
         mat = matchMat[1];
       } else {
@@ -151,26 +240,25 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
       // Extract Nome
       let nome = line
         .replace(/^(\d+)[\º\ª\.\-\s]/, '')
-        .replace(/(?:SOLDADO|CABO|3º SARGENTO|2º SARGENTO|1º SARGENTO|SUBTENENTE|2º TENENTE|1º TENENTE|CAPITÃO|MAJOR|TENENTE-CORONEL|CORONEL|SD|CB|1º SGT|2º SGT|3º SGT|SUB TEN|1º TEN|2º TEN|CAP|MAJ|TEN CEL)/gi, '')
+        .replace(/(?:SOLDADO|CABO|3º SARGENTO|2º SARGENTO|1º SARGENTO|SUBTENENTE|SUB TEN|SUB-TEN|2º TENENTE|1º TENENTE|CAPITÃO|MAJOR|TENENTE-CORONEL|CORONEL|SD|CB|1º SGT|2º SGT|3º SGT|1º SARG|2º SARG|3º SARG|SUB TEN|1º TEN|2º TEN|CAP|MAJ|TEN CEL)/gi, '')
         .replace(/(?:MATRÍCULA|MATRICULA|MAT|MAT\.)\s*[:\.\-]?\s*\d+/gi, '')
         .replace(/(?:PROMOVIDO EM|DATA PROMOÇÃO|PROMOÇÃO|DATA|EM)\s*[:\.\-]?\s*\d{2}[\/\-]\d{2}[\/\-]\d{4}/gi, '')
         .replace(/[\-\:\,\.]/g, ' ')
         .trim();
 
       if (!nome || nome.length < 3) {
-        nome = `POLICIAL MILITAR ${classNr}`;
+        return;
       }
 
       // Determine Quadro
-      const q: QuadroPMMS = (grad === 'Capitão' || grad === 'Major' || grad === 'Tenente-Coronel' || grad === 'Coronel' || grad === '1º Tenente' || grad === '2º Tenente') ? 'QOPM' : 'QPPM';
+      const q: QuadroPMMS = (lineGrad === 'Capitão' || lineGrad === 'Major' || lineGrad === 'Tenente-Coronel' || lineGrad === 'Coronel' || lineGrad === '1º Tenente' || lineGrad === '2º Tenente') ? 'QOPM' : 'QPPM';
 
       // Check against ARGOS User Database
       const hasArgos = isUserInArgos(mat, nome, undefined, argosUsersList);
 
-      items.push({
-        id: `ext_${Date.now()}_${index}`,
-        nr_classificacao: classNr,
-        graduacao: grad,
+      rawItems.push({
+        docIndex: index,
+        graduacao: lineGrad,
         nome: nome.toUpperCase(),
         matricula: mat,
         ultima_promocao: dtPromocao,
@@ -179,19 +267,111 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
       });
     });
 
-    // Sort strictly by NR DE CLASSIFICAÇÃO
-    return items.sort((a, b) => a.nr_classificacao - b.nr_classificacao);
+    // Rank hierarchy map
+    const RANK_HIERARCHY: Record<GraduacaoPMMS, number> = {
+      'Coronel': 1,
+      'Tenente-Coronel': 2,
+      'Major': 3,
+      'Capitão': 4,
+      '1º Tenente': 5,
+      '2º Tenente': 6,
+      'Subtenente': 7,
+      '1º Sargento': 8,
+      '2º Sargento': 9,
+      '3º Sargento': 10,
+      'Cabo': 11,
+      'Soldado': 12
+    };
+
+    // Sort by rank hierarchy first, then maintain original document order
+    rawItems.sort((a, b) => {
+      const rA = RANK_HIERARCHY[a.graduacao] || 99;
+      const rB = RANK_HIERARCHY[b.graduacao] || 99;
+      if (rA !== rB) return rA - rB;
+      return a.docIndex - b.docIndex;
+    });
+
+    // Map to final items with continuous classification starting at 1
+    return rawItems.map((item, idx) => ({
+      id: `ext_${Date.now()}_${idx}`,
+      nr_classificacao: idx + 1,
+      graduacao: item.graduacao,
+      nome: item.nome,
+      matricula: item.matricula,
+      ultima_promocao: item.ultima_promocao,
+      quadro: item.quadro,
+      cadastrado_argos: item.cadastrado_argos
+    }));
   };
 
-  const handleProcessAndExtract = () => {
+  const handleProcessAndExtract = async () => {
     setIsProcessing(true);
     setSuccessMessage(null);
 
-    setTimeout(() => {
-      const parsed = parseBCGTextToAlmanaque(rawText);
-      setExtractedList(parsed);
+    try {
+      if (importMode === 'upload' && selectedFile) {
+        // 1. First, perform fast, complete client-side extraction using pdfjs-dist
+        // This processes all pages line-by-line and extracts all 3,000+ officers without token truncation
+        const pdfText = await extractTextFromPdf(selectedFile);
+        setRawText(pdfText);
+        const parsedLocal = parseBCGTextToAlmanaque(pdfText);
+
+        if (parsedLocal && parsedLocal.length > 0) {
+          setExtractedList(parsedLocal);
+          setIsProcessing(false);
+          return;
+        }
+
+        // 2. Fallback to Gemini proxy if client-side extraction produced no results
+        try {
+          const base64Pdf = await fileToBase64(selectedFile);
+          const response = await fetch('/api/parse-bcg-pdf', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ base64Pdf })
+          });
+
+          if (response.ok) {
+            const resData = await response.json();
+            if (Array.isArray(resData.data) && resData.data.length > 0) {
+              const parsedItems: ExtractedAlmanaqueItem[] = resData.data.map((item: any, idx: number) => {
+                const mat = item.matricula ? String(item.matricula).trim() : `${Math.floor(100000 + Math.random() * 899999)}`;
+                const nome = item.nome ? String(item.nome).toUpperCase().trim() : `POLICIAL MILITAR ${idx + 1}`;
+                const grad = (item.graduacao || 'Soldado') as GraduacaoPMMS;
+                const q: QuadroPMMS = (grad === 'Capitão' || grad === 'Major' || grad === 'Tenente-Coronel' || grad === 'Coronel' || grad === '1º Tenente' || grad === '2º Tenente') ? 'QOPM' : 'QPPM';
+                const hasArgos = isUserInArgos(mat, nome, undefined, argosUsersList);
+
+                return {
+                  id: `gemini_ext_${Date.now()}_${idx}`,
+                  nr_classificacao: Number(item.nr_classificacao) || (idx + 1),
+                  graduacao: grad,
+                  nome,
+                  matricula: mat,
+                  ultima_promocao: item.ultima_promocao || new Date().toISOString().substring(0, 10),
+                  quadro: q,
+                  cadastrado_argos: hasArgos
+                };
+              });
+
+              setExtractedList(parsedItems.sort((a, b) => a.nr_classificacao - b.nr_classificacao));
+              setIsProcessing(false);
+              return;
+            }
+          }
+        } catch (err) {
+          console.warn('Proxy Gemini não respondeu:', err);
+        }
+      } else {
+        // Text paste mode
+        const parsed = parseBCGTextToAlmanaque(rawText);
+        setExtractedList(parsed);
+      }
+    } catch (err) {
+      console.error('Erro ao processar PDF do BCG:', err);
+      alert('Não foi possível ler o arquivo PDF. Verifique se o arquivo não está protegido por senha.');
+    } finally {
       setIsProcessing(false);
-    }, 800);
+    }
   };
 
   const handleAddManualRow = () => {
@@ -307,7 +487,7 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
             Importador de BCG & Quadro de Acesso (Almanaque)
           </h2>
           <p className="text-xs text-navy-400 font-semibold max-w-3xl mt-0.5">
-            Leia todas as páginas do BCG para extrair a lista geral classificatória. Policiais com cadastro no ARGOS serão destacados em <strong>negrito</strong>.
+            Leia todas as páginas do BCG para extrair a lista geral classificatória. Policiais com cadastro no ARGOS possuem a etiqueta de status correspondente.
           </p>
         </div>
       </div>
@@ -317,16 +497,6 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
         <div className="flex items-center justify-between pb-4 border-b border-navy-100">
           <div className="flex items-center gap-2">
             <button
-              onClick={() => setImportMode('texto')}
-              className={`px-4 py-2.5 rounded-xl font-black text-xs uppercase tracking-wider transition-all ${
-                importMode === 'texto' 
-                  ? 'bg-navy-950 text-amber-400 shadow-sm' 
-                  : 'bg-navy-50 text-navy-600 hover:bg-navy-100'
-              }`}
-            >
-              Texto / Páginas do BCG
-            </button>
-            <button
               onClick={() => setImportMode('upload')}
               className={`px-4 py-2.5 rounded-xl font-black text-xs uppercase tracking-wider transition-all ${
                 importMode === 'upload' 
@@ -335,6 +505,16 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
               }`}
             >
               Upload Arquivo PDF
+            </button>
+            <button
+              onClick={() => setImportMode('texto')}
+              className={`px-4 py-2.5 rounded-xl font-black text-xs uppercase tracking-wider transition-all ${
+                importMode === 'texto' 
+                  ? 'bg-navy-950 text-amber-400 shadow-sm' 
+                  : 'bg-navy-50 text-navy-600 hover:bg-navy-100'
+              }`}
+            >
+              Texto / Páginas do BCG
             </button>
           </div>
 
@@ -360,22 +540,8 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
           </div>
         </div>
 
-        {/* Text Paste / Pages Reader UI */}
-        {importMode === 'texto' ? (
-          <div className="space-y-2">
-            <label className="block text-[10px] font-black uppercase text-navy-500">
-              Cole o conteúdo das páginas do BCG para leitura completa da classificação:
-            </label>
-            <textarea
-              rows={8}
-              value={rawText}
-              onChange={(e) => setRawText(e.target.value)}
-              placeholder="Exemplo:&#10;1º - Soldado - ALLAN JONES - Matrícula 484506021 - Promoção: 05/09/2022&#10;2º - Cabo - CARLOS ALBERTO SILVA - Matrícula 102345 - Promoção: 10/05/2020"
-              className="w-full bg-navy-50 border border-navy-200 text-navy-950 font-mono text-xs p-4 rounded-2xl focus:ring-2 focus:ring-amber-500 outline-none"
-            />
-          </div>
-        ) : (
-          /* Upload Mode UI */
+        {/* Upload Mode UI */}
+        {importMode === 'upload' ? (
           <div className="bg-navy-50/50 border-2 border-dashed border-navy-200 hover:border-amber-500 rounded-2xl p-8 text-center space-y-4 transition-all flex flex-col items-center justify-center min-h-[220px]">
             <div className="w-12 h-12 bg-white text-amber-500 rounded-2xl flex items-center justify-center shadow-xs">
               <Upload className="w-6 h-6" />
@@ -395,18 +561,32 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
               <input type="file" accept=".pdf" onChange={handleFileChange} className="hidden" />
             </label>
           </div>
+        ) : (
+          /* Text Paste / Pages Reader UI */
+          <div className="space-y-2">
+            <label className="block text-[10px] font-black uppercase text-navy-500">
+              Cole o conteúdo das páginas do BCG para leitura completa da classificação:
+            </label>
+            <textarea
+              rows={8}
+              value={rawText}
+              onChange={(e) => setRawText(e.target.value)}
+              placeholder="Exemplo:&#10;1º - Soldado - ALLAN JONES - Matrícula 484506021 - Promoção: 05/09/2022&#10;2º - Cabo - CARLOS ALBERTO SILVA - Matrícula 102345 - Promoção: 10/05/2020"
+              className="w-full bg-navy-50 border border-navy-200 text-navy-950 font-mono text-xs p-4 rounded-2xl focus:ring-2 focus:ring-amber-500 outline-none"
+            />
+          </div>
         )}
 
         <div className="flex justify-end pt-2">
           <button
             onClick={handleProcessAndExtract}
-            disabled={isProcessing}
-            className="bg-amber-500 hover:bg-amber-400 text-navy-950 font-black text-xs uppercase tracking-wider px-6 py-3.5 rounded-2xl transition-all shadow-md flex items-center gap-2"
+            disabled={isProcessing || (importMode === 'upload' && !selectedFile)}
+            className="bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-navy-950 font-black text-xs uppercase tracking-wider px-6 py-3.5 rounded-2xl transition-all shadow-md flex items-center gap-2"
           >
             {isProcessing ? (
               <>
                 <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Lendo páginas e extraindo classificação...</span>
+                <span>Lendo páginas do BCG e extraindo classificação...</span>
               </>
             ) : (
               <>
@@ -440,7 +620,7 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
                 </span>
               </div>
               <p className="text-[11px] text-navy-400 font-medium mt-1">
-                {totalArgosCadastrados} policiais militares foram identificados com cadastro ativo no ARGOS (em <strong>negrito</strong>).
+                {totalArgosCadastrados} policiais militares foram identificados com cadastro ativo no ARGOS.
               </p>
             </div>
 
@@ -494,7 +674,7 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
                     <tr 
                       key={item.id} 
                       className={`transition-colors hover:bg-amber-50/40 ${
-                        isArgos ? 'bg-amber-50/20 font-black text-navy-950' : 'font-normal text-navy-700'
+                        isArgos ? 'bg-amber-50/20 text-navy-950 font-normal' : 'font-normal text-navy-700'
                       }`}
                     >
                       {/* Nr de Classificação */}
@@ -503,9 +683,7 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
                           type="number"
                           value={item.nr_classificacao}
                           onChange={(e) => handleUpdateItem(item.id, 'nr_classificacao', Number(e.target.value))}
-                          className={`w-16 bg-navy-50 border border-navy-200 text-xs rounded-lg px-2 py-1 text-center ${
-                            isArgos ? 'font-black text-navy-950' : 'font-semibold'
-                          }`}
+                          className="w-16 bg-navy-50 border border-navy-200 text-xs rounded-lg px-2 py-1 text-center font-medium text-navy-950"
                         />
                       </td>
 
@@ -514,9 +692,7 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
                         <select
                           value={item.graduacao}
                           onChange={(e) => handleUpdateItem(item.id, 'graduacao', e.target.value as GraduacaoPMMS)}
-                          className={`bg-navy-50 border border-navy-200 text-xs rounded-lg px-2 py-1 ${
-                            isArgos ? 'font-black text-navy-950' : 'font-semibold'
-                          }`}
+                          className="bg-navy-50 border border-navy-200 text-xs rounded-lg px-2 py-1 font-medium text-navy-950"
                         >
                           <option value="Soldado">Soldado</option>
                           <option value="Cabo">Cabo</option>
@@ -533,27 +709,23 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
                         </select>
                       </td>
 
-                      {/* Nome - Em Negrito se tem cadastro no ARGOS */}
+                      {/* Nome */}
                       <td className="p-3.5">
                         <input
                           type="text"
                           value={item.nome}
                           onChange={(e) => handleUpdateItem(item.id, 'nome', e.target.value.toUpperCase())}
-                          className={`w-full bg-navy-50 border border-navy-200 text-xs rounded-lg px-2.5 py-1 uppercase ${
-                            isArgos ? 'font-black text-navy-950 border-amber-400 bg-amber-100/50' : 'font-normal text-navy-700'
-                          }`}
+                          className="w-full bg-navy-50 border border-navy-200 text-xs rounded-lg px-2.5 py-1 uppercase font-normal text-navy-900"
                         />
                       </td>
 
-                      {/* Matrícula - Em Negrito se tem cadastro no ARGOS */}
+                      {/* Matrícula */}
                       <td className="p-3.5 font-mono">
                         <input
                           type="text"
                           value={item.matricula}
                           onChange={(e) => handleUpdateItem(item.id, 'matricula', e.target.value)}
-                          className={`w-28 bg-navy-50 border border-navy-200 text-xs rounded-lg px-2 py-1 ${
-                            isArgos ? 'font-black text-navy-950 border-amber-400 bg-amber-100/50' : 'font-medium text-navy-700'
-                          }`}
+                          className="w-28 bg-navy-50 border border-navy-200 text-xs rounded-lg px-2 py-1 font-medium text-navy-900"
                         />
                       </td>
 
@@ -563,9 +735,7 @@ export const ImportadorBCG: React.FC<ImportadorBCGProps> = ({
                           type="date"
                           value={item.ultima_promocao}
                           onChange={(e) => handleUpdateItem(item.id, 'ultima_promocao', e.target.value)}
-                          className={`bg-navy-50 border border-navy-200 text-xs rounded-lg px-2 py-1 ${
-                            isArgos ? 'font-black text-navy-950' : 'font-semibold'
-                          }`}
+                          className="bg-navy-50 border border-navy-200 text-xs rounded-lg px-2 py-1 font-medium text-navy-900"
                         />
                       </td>
 

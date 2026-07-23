@@ -107,6 +107,95 @@ Se patrulheiros não existirem, deixe vazio. Não use crases (\`\`\`) nem inclua
     }
   });
 
+  // API Route for processing BCG PDF for Quadro de Acesso / Almanaque
+  app.post("/api/parse-bcg-pdf", async (req, res) => {
+    try {
+      const { base64Pdf } = req.body;
+      const apiKey = process.env.GEMINI_API_KEY;
+
+      if (!apiKey) {
+        return res.status(500).json({ error: "Chave de API do Gemini não configurada no servidor (.env)." });
+      }
+
+      if (!base64Pdf) {
+        return res.status(400).json({ error: "Nenhum PDF fornecido." });
+      }
+
+      const ai = new GoogleGenAI({
+        apiKey,
+        httpOptions: {
+          headers: {
+            'User-Agent': 'aistudio-build',
+          }
+        }
+      });
+
+      const prompt = `Você é um especialista em leitura de Boletins Gerais da Polícia Militar (BCG / PMMS).
+O documento fornecido é um Boletim Geral (BCG) ou Anexo de Quadro de Acesso / Almanaque Geral.
+
+Leia TODAS AS PÁGINAS do documento fornecido e extraia TODOS os policiais militares listados no documento na ordem classificatória.
+
+Para cada policial militar listado, identifique:
+1. "nr_classificacao": número inteiro da classificação (ex: 1, 2, 3...)
+2. "graduacao": uma das seguintes palavras exatas: "Soldado", "Cabo", "3º Sargento", "2º Sargento", "1º Sargento", "Subtenente", "2º Tenente", "1º Tenente", "Capitão", "Major", "Tenente-Coronel", "Coronel".
+3. "nome": Nome do policial militar em MAIÚSCULAS.
+4. "matricula": Número da matrícula (dígitos). Se não houver matrícula, retorne "".
+5. "ultima_promocao": Data da última promoção ou praça no formato "YYYY-MM-DD".
+
+Retorne OBRIGATÓRIA E ESTRITAMENTE um array JSON puro com a lista extraída:
+[
+  {
+    "nr_classificacao": 1,
+    "graduacao": "Soldado",
+    "nome": "NOME DO MILITAR",
+    "matricula": "123456",
+    "ultima_promocao": "2022-09-05"
+  }
+]
+Não inclua explicações ou texto fora do JSON.`;
+
+      let response;
+      let attempt = 0;
+      const maxAttempts = 3;
+
+      while (attempt < maxAttempts) {
+        attempt++;
+        const modelName = attempt === maxAttempts ? 'gemini-3.1-flash-lite' : 'gemini-3.5-flash';
+        try {
+          console.log(`[Gemini API - BCG] Chamando modelo ${modelName} (tentativa ${attempt}/${maxAttempts})...`);
+          response = await ai.models.generateContent({
+            model: modelName,
+            contents: [
+              { inlineData: { data: base64Pdf, mimeType: "application/pdf" } },
+              { text: prompt }
+            ],
+            config: {
+              responseMimeType: "application/json",
+              temperature: 0.1
+            }
+          });
+          break;
+        } catch (err: any) {
+          console.error(`Tentativa ${attempt} do proxy Gemini BCG falhou:`, err.message || err);
+          if (attempt === maxAttempts) throw err;
+          await new Promise((resolve) => setTimeout(resolve, attempt * 1500));
+        }
+      }
+
+      if (!response) {
+        throw new Error("Não foi possível obter resposta do modelo Gemini.");
+      }
+
+      const textResponse = response.text || '[]';
+      const parsedData = JSON.parse(textResponse);
+      res.json({ data: parsedData });
+
+    } catch (error: any) {
+      console.error("Erro no proxy do Gemini BCG:", error.message);
+      res.status(500).json({ error: error.message || "Erro desconhecido ao processar o PDF do BCG." });
+    }
+  });
+
   // In-memory store for uploaded files to serve them publicly
   const uploadedFiles = new Map<string, { filename: string; buffer: Buffer; mimeType: string }>();
 

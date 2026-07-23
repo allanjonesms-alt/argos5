@@ -229,28 +229,28 @@ export const MilitaresCadastros: React.FC<MilitaresCadastrosProps> = ({
                     <tr 
                       key={m.id} 
                       className={`transition-colors hover:bg-amber-50/40 ${
-                        isArgos ? 'bg-amber-50/20 font-black text-navy-950' : 'font-normal text-navy-700'
+                        isArgos ? 'bg-amber-50/20 text-navy-950 font-normal' : 'font-normal text-navy-700'
                       }`}
                     >
-                      <td className="p-4 pl-6 font-black text-amber-600">
+                      <td className="p-4 pl-6 font-bold text-amber-600">
                         {m.ordem_antiguidade}º
                       </td>
                       <td className="p-4">
-                        <span className={`px-2.5 py-1 rounded-xl text-[10px] uppercase ${
-                          isArgos ? 'bg-amber-400 text-navy-950 font-black' : 'bg-navy-100 text-navy-950 font-bold'
+                        <span className={`px-2.5 py-1 rounded-xl text-[10px] uppercase font-bold ${
+                          isArgos ? 'bg-amber-400 text-navy-950' : 'bg-navy-100 text-navy-950'
                         }`}>
                           {m.graduacao}
                         </span>
                       </td>
                       <td className="p-4">
                         <div className="flex items-center gap-3">
-                          <div className={`w-8 h-8 rounded-xl flex items-center justify-center text-xs shrink-0 ${
-                            isArgos ? 'bg-amber-500 text-navy-950 font-black' : 'bg-navy-100 text-navy-900 font-bold'
+                          <div className={`w-8 h-8 rounded-xl flex items-center justify-center text-xs font-bold shrink-0 ${
+                            isArgos ? 'bg-amber-500 text-navy-950' : 'bg-navy-100 text-navy-900'
                           }`}>
                             {m.nome_guerra ? m.nome_guerra.substring(0, 2) : 'PM'}
                           </div>
                           <div>
-                            <span className={`block uppercase ${isArgos ? 'font-black text-navy-950 text-sm' : 'font-semibold text-navy-900'}`}>
+                            <span className="block uppercase font-semibold text-navy-900 text-sm">
                               {m.nome}
                             </span>
                             <span className="text-[10px] text-navy-400 block uppercase font-medium">
@@ -259,10 +259,10 @@ export const MilitaresCadastros: React.FC<MilitaresCadastrosProps> = ({
                           </div>
                         </div>
                       </td>
-                      <td className={`p-4 font-mono ${isArgos ? 'font-black text-navy-950' : 'font-bold text-navy-700'}`}>
+                      <td className="p-4 font-mono font-medium text-navy-900">
                         {m.matricula}
                       </td>
-                      <td className={`p-4 ${isArgos ? 'font-black text-navy-950' : 'font-semibold text-navy-800'}`}>
+                      <td className="p-4 font-semibold text-navy-800">
                         {m.ultima_promocao}
                       </td>
                       <td className="p-4">
