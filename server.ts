@@ -107,6 +107,84 @@ Se patrulheiros não existirem, deixe vazio. Não use crases (\`\`\`) nem inclua
     }
   });
 
+  // In-memory store for uploaded files to serve them publicly
+  const uploadedFiles = new Map<string, { filename: string; buffer: Buffer; mimeType: string }>();
+
+  // API Route to upload a PDF file
+  app.post("/api/upload-pdf", (req, res) => {
+    try {
+      const { filename, base64Data } = req.body;
+      if (!filename || !base64Data) {
+        return res.status(400).json({ error: "Nome do arquivo e dados em base64 são obrigatórios." });
+      }
+
+      const fileId = "pdf_" + Math.random().toString(36).substring(2, 15);
+      const buffer = Buffer.from(base64Data, "base64");
+      
+      uploadedFiles.set(fileId, {
+        filename: filename.endsWith(".pdf") ? filename : `${filename}.pdf`,
+        buffer,
+        mimeType: "application/pdf"
+      });
+
+      res.json({ 
+        id: fileId,
+        url: `/api/uploads/${fileId}`
+      });
+    } catch (error: any) {
+      console.error("Erro ao fazer upload do PDF:", error);
+      res.status(500).json({ error: "Erro interno ao salvar o PDF." });
+    }
+  });
+
+  // API Route to append values to Google Sheets
+  app.post("/api/sheets/append", async (req, res) => {
+    try {
+      const { accessToken, spreadsheetId, range, values } = req.body;
+      
+      if (!accessToken || !spreadsheetId || !values) {
+        return res.status(400).json({ error: "accessToken, spreadsheetId e values são obrigatórios." });
+      }
+
+      const targetRange = range || "Página1!A1";
+      const url = `https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}/values/${encodeURIComponent(targetRange)}:append?valueInputOption=USER_ENTERED`;
+
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ values })
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error("Erro no Google Sheets API:", errorText);
+        return res.status(response.status).json({ error: "Erro no Google Sheets: " + errorText });
+      }
+
+      const data = await response.json();
+      res.json({ success: true, result: data });
+    } catch (error: any) {
+      console.error("Erro na rota /api/sheets/append:", error);
+      res.status(500).json({ error: error.message || "Erro ao conectar ao Google Sheets." });
+    }
+  });
+
+  // API Route to download/view the uploaded PDF
+  app.get("/api/uploads/:id", (req, res) => {
+    const fileId = req.params.id;
+    const file = uploadedFiles.get(fileId);
+    if (!file) {
+      return res.status(404).send("Arquivo não encontrado.");
+    }
+
+    res.setHeader("Content-Type", file.mimeType);
+    res.setHeader("Content-Disposition", `inline; filename="${encodeURIComponent(file.filename)}"`);
+    res.send(file.buffer);
+  });
+
   // Vite middleware
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

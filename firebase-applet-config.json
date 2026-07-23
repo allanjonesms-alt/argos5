@@ -3,8 +3,9 @@
   "appId": "1:473889295670:web:67979bb8bd0f7da5ff3797",
   "apiKey": "AIzaSyBdlQzHwr_duwkHH06pnzkjn2xQwwDRuhQ",
   "authDomain": "gen-lang-client-0506636251.firebaseapp.com",
-  "firestoreDatabaseId": "aborda5",
   "storageBucket": "gen-lang-client-0506636251.firebasestorage.app",
   "messagingSenderId": "473889295670",
-  "measurementId": "G-41N08HJ1JZ"
+  "measurementId": "G-41N08HJ1JZ",
+  "oAuthClientId": "473889295670-m2sn2djon2q0s2qj97sp78ol8n2er88p.apps.googleusercontent.com",
+  "recaptchaSiteKey": ""
 }

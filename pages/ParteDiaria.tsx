@@ -4,7 +4,21 @@ import { db, handleFirestoreError, OperationType, logAction } from '../firebase'
 import { collection, query, where, orderBy, getDocs, doc, setDoc, limit, onSnapshot, deleteDoc } from 'firebase/firestore';
 import { User, UserRole, Unit } from '../types';
 import TacticalAlert from '../components/TacticalAlert';
-import { Siren, Plus, ArrowLeft, Search, FileText, Printer, Calendar, User as UserIcon, Edit3, Shield, Info, Activity, Package, AlertTriangle, Play, Check, Trash, Loader2, Anchor, ArrowRight, UserCheck, CheckCircle } from 'lucide-react';
+import { Siren, Plus, ArrowLeft, Search, FileText, Printer, Calendar, User as UserIcon, Edit3, Shield, Info, Activity, Package, AlertTriangle, Play, Check, Trash, Loader2, Anchor, ArrowRight, UserCheck, CheckCircle, Table, ExternalLink, Settings, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react';
+import { 
+  signInWithGoogleForSheets, 
+  appendActionToGoogleSheet, 
+  syncMultipleActionsToGoogleSheet, 
+  getStoredSpreadsheetId, 
+  setStoredSpreadsheetId, 
+  getStoredSheetName, 
+  setStoredSheetName, 
+  initGoogleSheetsAuth, 
+  getCachedGoogleAccessToken,
+  DEFAULT_SPREADSHEET_ID,
+  DEFAULT_SHEET_NAME
+} from '../lib/googleSheets';
+import { getShiftDetails } from '../lib/shiftUtils';
 
 interface ParteDiariaProps {
   user: User | null;
@@ -70,6 +84,87 @@ const ParteDiaria: React.FC<ParteDiariaProps> = ({ user }) => {
   const [activeActionName, setActiveActionName] = useState<string | null>(null);
   const [activeActionCategory, setActiveActionCategory] = useState<string | null>(null);
   const [isSavingAction, setIsSavingAction] = useState(false);
+
+  // Collapsed sections state (CRIMES AMBIENTAIS collapsed by default)
+  const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({
+    crimes_ambientais: true
+  });
+
+  const toggleSection = (sectionId: string) => {
+    setCollapsedSections(prev => ({
+      ...prev,
+      [sectionId]: !prev[sectionId]
+    }));
+  };
+
+  // Google Sheets integration state
+  const [googleUser, setGoogleUser] = useState<any | null>(null);
+  const [googleToken, setGoogleToken] = useState<string | null>(null);
+  const [isConnectingSheets, setIsConnectingSheets] = useState(false);
+  const [isSyncingAll, setIsSyncingAll] = useState(false);
+  const [showSheetsModal, setShowSheetsModal] = useState(false);
+  const [inputSpreadsheetId, setInputSpreadsheetId] = useState(getStoredSpreadsheetId());
+  const [inputSheetName, setInputSheetName] = useState(getStoredSheetName());
+
+  useEffect(() => {
+    const unsubSheets = initGoogleSheetsAuth(
+      (gUser: any, token: any) => {
+        setGoogleUser(gUser);
+        setGoogleToken(token);
+      },
+      () => {
+        setGoogleUser(null);
+        setGoogleToken(null);
+      }
+    );
+    return () => {
+      if (unsubSheets) unsubSheets();
+    };
+  }, []);
+
+  const handleConnectGoogleSheets = async () => {
+    setIsConnectingSheets(true);
+    try {
+      const res = await signInWithGoogleForSheets();
+      if (res) {
+        setGoogleUser(res.user);
+        setGoogleToken(res.accessToken);
+        setAlertMessage('Conta do Google conectada com sucesso para sincronização do Sheets!');
+      }
+    } catch (err: any) {
+      console.error(err);
+      setAlertMessage(`Erro ao conectar conta Google: ${err.message || err}`);
+    } finally {
+      setIsConnectingSheets(false);
+    }
+  };
+
+  const handleSyncAllRecentActions = async () => {
+    const currentToken = googleToken || getCachedGoogleAccessToken();
+    if (!currentToken) {
+      setAlertMessage('Por favor, conecte com a Conta do Google antes de sincronizar.');
+      return;
+    }
+    if (recentActions.length === 0) {
+      setAlertMessage('Nenhuma ação encontrada para sincronizar.');
+      return;
+    }
+
+    setIsSyncingAll(true);
+    try {
+      const res = await syncMultipleActionsToGoogleSheet(recentActions, currentToken);
+      if (res.success) {
+        setAlertMessage(`Sucesso! ${res.count} ações sincronizadas na Planilha do Google.`);
+      } else {
+        setAlertMessage(`Erro ao sincronizar: ${res.message}`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setAlertMessage(`Erro ao sincronizar lote: ${err.message || err}`);
+    } finally {
+      setIsSyncingAll(false);
+    }
+  };
 
   // Dialog/Modal input states
   const [actQty, setActQty] = useState(1);
@@ -783,8 +878,20 @@ const ParteDiaria: React.FC<ParteDiariaProps> = ({ user }) => {
         'daily_actions',
         newId
       );
+
+      // Attempt automatic sync with Google Sheets if token exists
+      let googleSheetsMsg = '';
+      const currentToken = googleToken || getCachedGoogleAccessToken();
+      if (currentToken) {
+        const sheetRes = await appendActionToGoogleSheet(payload, currentToken);
+        if (sheetRes.success) {
+          googleSheetsMsg = ' | 📊 Sincronizado no Google Sheets (Turno -4 UTC)!';
+        } else {
+          googleSheetsMsg = ` | (Aviso Sheets: ${sheetRes.message})`;
+        }
+      }
       
-      setAlertMessage(`Sucesso: Ação "${activeActionName}" registrada e vinculada com sucesso!`);
+      setAlertMessage(`Sucesso: Ação "${activeActionName}" registrada!${googleSheetsMsg}`);
       setActiveActionName(null);
       setActiveActionCategory(null);
       
@@ -1037,7 +1144,6 @@ const ParteDiaria: React.FC<ParteDiariaProps> = ({ user }) => {
         color: 'bg-blue-50 border-blue-100 text-blue-900',
         icon: 'fas fa-shield-alt',
         items: [
-          { name: 'Blitz', category: 'OPERAÇÕES' },
           { name: 'Apoio a outro Órgão', category: 'OPERAÇÕES' },
           { name: 'Operação Policial', category: 'OPERAÇÕES' }
         ]
@@ -1051,29 +1157,38 @@ const ParteDiaria: React.FC<ParteDiariaProps> = ({ user }) => {
           { name: 'Arma Branca', category: 'APREENSÕES DIVERSAS' },
           { name: 'Arma de Fogo', category: 'APREENSÕES DIVERSAS' },
           { name: 'Equipamento de Som', category: 'APREENSÕES DIVERSAS' },
-          { name: 'Veículo recuperado (MOTOCICLETA ou AUTOMOVEL)', category: 'APREENSÕES DIVERSAS' },
-          { name: 'Veículo Removido ao Detran (MOTOCICLETA ou AUTOMOVEL)', category: 'APREENSÕES DIVERSAS' },
-          { name: 'Documentos recolhidos ao DETRAN', category: 'APREENSÕES DIVERSAS' },
-          { name: 'RECUPERAÇÃO DE CARGAS ROUBADAS/FURTADAS (Nº de Ocorrências)', category: 'APREENSÕES DIVERSAS' },
-          { name: 'Barcos (nr de barcos)', category: 'APREENSÕES DIVERSAS' },
-          { name: 'Explosivos', category: 'APREENSÕES DIVERSAS' },
-          { name: 'Madeira (Lascas)', category: 'APREENSÕES DIVERSAS' },
-          { name: 'MADEIRA (M³)', category: 'APREENSÕES DIVERSAS' },
-          { name: 'MADEIRA (Toras)', category: 'APREENSÕES DIVERSAS' },
-          { name: 'MOTOR DE POPA (Nº de motores)', category: 'APREENSÕES DIVERSAS' },
-          { name: 'PESCADO (Kg)', category: 'APREENSÕES DIVERSAS' },
-          { name: 'PETRECHOS UTILIZADOS NA PRÁTICA DE PESCA PREDATÓRIA (Nº de petrechos)', category: 'APREENSÕES DIVERSAS' }
+          { name: 'RECUPERAÇÃO DE CARGAS ROUBADAS/FURTADAS (Nº de Ocorrências)', category: 'APREENSÕES DIVERSAS' }
         ]
       },
       {
-        id: 'acidentes',
-        title: 'ACIDENTES',
+        id: 'transito',
+        title: 'TRÂNSITO',
         color: 'bg-rose-50 border-rose-100 text-rose-900',
-        icon: 'fas fa-car-crash',
+        icon: 'fas fa-car',
         items: [
-          { name: 'Acidente de trânsito sem Vítima', category: 'ACIDENTE' },
-          { name: 'Acidente de Trânsito com vítima', category: 'ACIDENTE' },
-          { name: 'Acidente de Trânsito com Vítima Fatal', category: 'ACIDENTE' }
+          { name: 'Blitz', category: 'TRÂNSITO' },
+          { name: 'Veículo recuperado (MOTOCICLETA ou AUTOMOVEL)', category: 'TRÂNSITO' },
+          { name: 'Veículo Removido ao Detran (MOTOCICLETA ou AUTOMOVEL)', category: 'TRÂNSITO' },
+          { name: 'Documentos recolhidos ao DETRAN', category: 'TRÂNSITO' },
+          { name: 'Acidente de trânsito sem Vítima', category: 'TRÂNSITO' },
+          { name: 'Acidente de Trânsito com vítima', category: 'TRÂNSITO' },
+          { name: 'Acidente de Trânsito com Vítima Fatal', category: 'TRÂNSITO' }
+        ]
+      },
+      {
+        id: 'crimes_ambientais',
+        title: 'CRIMES AMBIENTAIS',
+        color: 'bg-emerald-50 border-emerald-100 text-emerald-900',
+        icon: 'fas fa-tree',
+        items: [
+          { name: 'Barcos (nr de barcos)', category: 'CRIMES AMBIENTAIS' },
+          { name: 'Explosivos', category: 'CRIMES AMBIENTAIS' },
+          { name: 'Madeira (Lascas)', category: 'CRIMES AMBIENTAIS' },
+          { name: 'MADEIRA (M³)', category: 'CRIMES AMBIENTAIS' },
+          { name: 'MADEIRA (Toras)', category: 'CRIMES AMBIENTAIS' },
+          { name: 'MOTOR DE POPA (Nº de motores)', category: 'CRIMES AMBIENTAIS' },
+          { name: 'PESCADO (Kg)', category: 'CRIMES AMBIENTAIS' },
+          { name: 'PETRECHOS UTILIZADOS NA PRÁTICA DE PESCA PREDATÓRIA (Nº de petrechos)', category: 'CRIMES AMBIENTAIS' }
         ]
       }
     ];
@@ -1109,6 +1224,170 @@ const ParteDiaria: React.FC<ParteDiariaProps> = ({ user }) => {
             Voltar para Controle de Partes
           </button>
         </div>
+
+        {/* Card de Integração Google Sheets */}
+        <div className="bg-emerald-950/5 border border-emerald-500/20 rounded-3xl p-6 shadow-xs space-y-4 relative">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-center gap-3">
+              <div className="bg-emerald-600 text-white p-2.5 rounded-2xl shadow-sm">
+                <Table className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex items-center gap-2">
+                  <h4 className="font-black text-xs uppercase tracking-wider text-navy-950">
+                    Planilha do Google Sheets (Coleta Diária)
+                  </h4>
+                  <span className="bg-emerald-600/15 text-emerald-800 border border-emerald-500/30 px-2 py-0.5 rounded-full text-[8px] font-black uppercase tracking-widest">
+                    Turno -4 UTC (08h às 08h)
+                  </span>
+                </div>
+                <p className="text-[10px] text-navy-500 font-semibold mt-0.5">
+                  Lançamentos automáticos no fuso horário -4 UTC. Turno de 24 horas das 08h00 às 08h00.
+                </p>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={() => setShowSheetsModal(true)}
+                className="bg-white border border-navy-150 text-navy-800 hover:bg-navy-50 p-2.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-xs active:scale-95"
+                title="Configurar ID da Planilha Mensal"
+              >
+                <Settings className="w-4 h-4 text-navy-600" />
+                <span className="hidden md:inline text-[10px] font-black uppercase tracking-wider">Configurar Planilha</span>
+              </button>
+
+              <a
+                href={`https://docs.google.com/spreadsheets/d/${inputSpreadsheetId}/edit`}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="bg-white border border-emerald-300 text-emerald-800 hover:bg-emerald-50 p-2.5 rounded-xl font-bold text-xs flex items-center gap-1.5 transition-all shadow-xs active:scale-95"
+                title="Abrir Planilha no Google Sheets"
+              >
+                <ExternalLink className="w-4 h-4 text-emerald-600" />
+                <span className="hidden md:inline text-[10px] font-black uppercase tracking-wider">Abrir Planilha</span>
+              </a>
+            </div>
+          </div>
+
+          <div className="bg-white border border-emerald-100 rounded-2xl p-4 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div className="flex items-center gap-2 text-xs">
+              <span className={`w-2.5 h-2.5 rounded-full ${googleToken ? 'bg-emerald-500 animate-pulse' : 'bg-amber-400'}`}></span>
+              <span className="font-bold text-navy-900">
+                {googleToken ? (
+                  <>Sincronização Ativa <span className="text-navy-400 font-mono text-[10px]">({googleUser?.email || 'Conectado'})</span></>
+                ) : (
+                  <>Autenticação Pendente com Conta Google</>
+                )}
+              </span>
+            </div>
+
+            <div className="flex flex-wrap items-center gap-2">
+              {!googleToken ? (
+                <button
+                  onClick={handleConnectGoogleSheets}
+                  disabled={isConnectingSheets}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-black text-[10px] uppercase tracking-widest px-4 py-2.5 rounded-xl transition-all shadow-md active:scale-95 flex items-center gap-2"
+                >
+                  {isConnectingSheets ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Table className="w-3.5 h-3.5" />}
+                  Conectar Conta Google / Sheets
+                </button>
+              ) : (
+                <button
+                  onClick={handleSyncAllRecentActions}
+                  disabled={isSyncingAll || recentActions.length === 0}
+                  className="bg-navy-950 hover:bg-navy-900 disabled:bg-navy-200 text-white font-black text-[10px] uppercase tracking-widest px-4 py-2.5 rounded-xl transition-all shadow-md active:scale-95 flex items-center gap-2"
+                >
+                  {isSyncingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" /> : <RefreshCw className="w-3.5 h-3.5 text-amber-400" />}
+                  Sincronizar {recentActions.length} Registros do Dia
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Modal para alteração do ID da Planilha Mensal */}
+        {showSheetsModal && (
+          <div className="fixed inset-0 bg-navy-950/80 backdrop-blur-xs z-50 flex items-center justify-center p-4">
+            <div className="bg-white rounded-3xl border border-navy-100 shadow-2xl max-w-lg w-full p-6 space-y-6">
+              <div className="flex items-center justify-between border-b border-navy-100 pb-4">
+                <div className="flex items-center gap-2">
+                  <div className="bg-emerald-100 p-2 rounded-xl text-emerald-800">
+                    <Table className="w-5 h-5" />
+                  </div>
+                  <div>
+                    <h3 className="font-black text-sm uppercase text-navy-950 tracking-wide">Configuração da Planilha Google</h3>
+                    <p className="text-[10px] text-navy-400 font-bold uppercase tracking-wider">Importação de nova planilha mensal em branco</p>
+                  </div>
+                </div>
+                <button
+                  onClick={() => setShowSheetsModal(false)}
+                  className="text-navy-400 hover:text-navy-950 text-xs font-black uppercase"
+                >
+                  Fechar
+                </button>
+              </div>
+
+              <div className="space-y-4 text-xs">
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-black uppercase text-navy-700 tracking-wider">
+                    ID da Planilha no Google Sheets (Spreadsheet ID)
+                  </label>
+                  <input
+                    type="text"
+                    value={inputSpreadsheetId}
+                    onChange={(e) => setInputSpreadsheetId(e.target.value)}
+                    placeholder="EX: 17TuUL31lhpQv3VrHI0EJZypfa0uj6ujrgx27KBHl5bA"
+                    className="w-full border border-navy-200 rounded-xl p-3 font-mono text-xs font-bold text-navy-950 focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                  <p className="text-[9px] text-navy-400 font-medium">
+                    O ID é o código encontrado na URL da planilha entre <code className="bg-navy-50 px-1 py-0.5 rounded">/d/</code> e <code className="bg-navy-50 px-1 py-0.5 rounded">/edit</code>.
+                  </p>
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="block text-[10px] font-black uppercase text-navy-700 tracking-wider">
+                    Nome da Aba / Guia na Planilha
+                  </label>
+                  <input
+                    type="text"
+                    value={inputSheetName}
+                    onChange={(e) => setInputSheetName(e.target.value)}
+                    placeholder="EX: Página1"
+                    className="w-full border border-navy-200 rounded-xl p-3 font-bold text-navy-950 focus:ring-2 focus:ring-emerald-500 outline-none"
+                  />
+                </div>
+
+                <div className="bg-amber-50 border border-amber-200 rounded-2xl p-3 text-[10px] text-amber-900 leading-relaxed font-semibold">
+                  💡 <span className="font-black">Troca Mensal:</span> Ao início de cada mês, quando uma nova planilha em branco for disponibilizada, basta colar o novo ID acima para atualizar o destino automático dos lançamentos.
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 border-t border-navy-100 pt-4">
+                <button
+                  onClick={() => {
+                    setInputSpreadsheetId(DEFAULT_SPREADSHEET_ID);
+                    setInputSheetName(DEFAULT_SHEET_NAME);
+                  }}
+                  className="text-navy-500 hover:text-navy-900 text-[10px] font-black uppercase tracking-wider px-3 py-2"
+                >
+                  Restaurar Padrão
+                </button>
+                <button
+                  onClick={() => {
+                    setStoredSpreadsheetId(inputSpreadsheetId);
+                    setStoredSheetName(inputSheetName);
+                    setShowSheetsModal(false);
+                    setAlertMessage('Configuração da Planilha Google atualizada com sucesso!');
+                  }}
+                  className="bg-emerald-600 hover:bg-emerald-500 text-white font-black text-[10px] uppercase tracking-widest px-5 py-2.5 rounded-xl transition-all shadow-md active:scale-95"
+                >
+                  Salvar Configuração
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Guarnição Ativa / Operador Info */}
         <div className="bg-white border border-navy-100 rounded-3xl p-6 shadow-xs space-y-4">
@@ -1479,43 +1758,74 @@ const ParteDiaria: React.FC<ParteDiariaProps> = ({ user }) => {
           <h3 className="text-navy-950 font-black uppercase text-xs tracking-wider ml-1">Painel Operacional - Escolha uma Ação Diária</h3>
           
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {categories.map((cat) => (
-              <div key={cat.id} className="bg-white border border-navy-100 rounded-3xl p-5 shadow-sm space-y-4">
-                <div className="flex items-center gap-2 pb-3 border-b border-navy-50">
-                  <div className="bg-navy-950 text-white p-2 text-xs rounded-xl">
-                    <i className={`${cat.icon} text-amber-400`}></i>
-                  </div>
-                  <span className="font-black text-xs text-navy-950 tracking-wider uppercase">{cat.title}</span>
-                </div>
+            {categories.map((cat) => {
+              const isCollapsed = !!collapsedSections[cat.id];
+              return (
+                <div key={cat.id} className="bg-white border border-navy-100 rounded-3xl p-5 shadow-sm space-y-4">
+                  <div 
+                    onClick={() => toggleSection(cat.id)}
+                    className="flex items-center justify-between gap-2 pb-3 border-b border-navy-50 cursor-pointer select-none group hover:opacity-80 transition-all"
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className="bg-navy-950 text-white p-2 text-xs rounded-xl">
+                        <i className={`${cat.icon} text-amber-400`}></i>
+                      </div>
+                      <span className="font-black text-xs text-navy-950 tracking-wider uppercase">{cat.title}</span>
+                      {isCollapsed && (
+                        <span className="bg-navy-50 text-navy-500 border border-navy-100 text-[9px] font-bold px-2 py-0.5 rounded-full uppercase tracking-wider">
+                          {cat.items.length} itens
+                        </span>
+                      )}
+                    </div>
 
-                <div className="flex flex-col gap-2">
-                  {cat.items.map((item, index) => (
                     <button
-                      key={index}
-                      onClick={() => {
-                        setActiveActionName(item.name);
-                        setActiveActionCategory(item.category);
-                        // Default setups
-                        setActQty(1);
-                        setActNome('');
-                        setActCpf('');
-                        setActPlaca('');
-                        setActType('MOTOCICLETA');
-                        setActDesc('');
-                        setActVictims([]);
-                        if (['Acidente de Trânsito com vítima', 'Acidente de Trânsito com Vítima Fatal'].includes(item.name)) {
-                          setActVictims([{ sex: 'Masculino', age: '' }]);
-                        }
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleSection(cat.id);
                       }}
-                      className="w-full text-left bg-navy-50 hover:bg-navy-900 hover:text-white px-4 py-3 rounded-2xl text-[11px] font-black text-navy-900 uppercase tracking-tight transition-all flex items-center justify-between group active:scale-[0.98]"
+                      className="p-1.5 text-navy-400 hover:text-navy-900 hover:bg-navy-50 rounded-lg transition-all"
+                      title={isCollapsed ? "Expandir Seção" : "Recolher Seção"}
                     >
-                      <span className="truncate pr-1">{item.name}</span>
-                      <ArrowRight className="w-4 h-4 text-navy-400 group-hover:text-amber-400 group-hover:translate-x-1 transition-all shrink-0" />
+                      {isCollapsed ? (
+                        <ChevronDown className="w-4 h-4 text-navy-600" />
+                      ) : (
+                        <ChevronUp className="w-4 h-4 text-navy-600" />
+                      )}
                     </button>
-                  ))}
+                  </div>
+
+                  {!isCollapsed && (
+                    <div className="flex flex-col gap-2">
+                      {cat.items.map((item, index) => (
+                        <button
+                          key={index}
+                          onClick={() => {
+                            setActiveActionName(item.name);
+                            setActiveActionCategory(item.category);
+                            // Default setups
+                            setActQty(1);
+                            setActNome('');
+                            setActCpf('');
+                            setActPlaca('');
+                            setActType('MOTOCICLETA');
+                            setActDesc('');
+                            setActVictims([]);
+                            if (['Acidente de Trânsito com vítima', 'Acidente de Trânsito com Vítima Fatal'].includes(item.name)) {
+                              setActVictims([{ sex: 'Masculino', age: '' }]);
+                            }
+                          }}
+                          className="w-full text-left bg-navy-50 hover:bg-navy-900 hover:text-white px-4 py-3 rounded-2xl text-[11px] font-black text-navy-900 uppercase tracking-tight transition-all flex items-center justify-between group active:scale-[0.98]"
+                        >
+                          <span className="truncate pr-1">{item.name}</span>
+                          <ArrowRight className="w-4 h-4 text-navy-400 group-hover:text-amber-400 group-hover:translate-x-1 transition-all shrink-0" />
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
 

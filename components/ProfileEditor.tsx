@@ -73,7 +73,11 @@ export function ProfileEditor({ userToEdit, onSave, onCancel, onDelete, units, i
     try {
       const q = query(collection(db, 'users'), where('matricula', '==', matricula.trim()));
       const snap = await getDocs(q);
-      setMatriculaExists(!snap.empty);
+      const hasRealDuplicate = snap.docs.some(doc => {
+        const data = doc.data();
+        return !data.is_session && data.ord !== 99 && doc.id !== userToEdit?.id;
+      });
+      setMatriculaExists(hasRealDuplicate);
     } catch (err) {
       console.error("Erro ao verificar matrícula:", err);
     } finally {

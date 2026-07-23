@@ -134,6 +134,7 @@ const Login: React.FC<LoginProps> = ({ onLogin }) => {
             unidade: data.unidade || '',
             primeiro_acesso: data.primeiro_acesso ?? true,
             ord: 99,
+            is_session: true,
             created_at: new Date().toISOString()
           }, { merge: true });
         }

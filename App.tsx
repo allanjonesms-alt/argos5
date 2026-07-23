@@ -34,6 +34,7 @@ import RoTemplates from './pages/RoTemplates';
 import StartShift from './pages/StartShift';
 import { EfetivoPage } from './pages/EfetivoPage';
 import { GestaoPessoalPage } from './pages/GestaoPessoalPage';
+import { PromocoesPage } from './pages/PromocoesPage';
 import { RequerimentosPage } from './pages/RequerimentosPage';
 import { EscalaRemuneradaPage } from './pages/EscalaRemuneradaPage';
 import { FormaturaPage } from './pages/FormaturaPage';
@@ -322,6 +323,7 @@ const App: React.FC = () => {
             <Route path="/estatisticas" element={<Statistics user={auth.user} />} />
             <Route path="/operadores" element={<Operators user={auth.user} />} />
             <Route path="/gestao-pessoal" element={<GestaoPessoalPage user={auth.user} />} />
+            <Route path="/promocoes" element={<PromocoesPage user={auth.user} />} />
             <Route path="/formatura" element={<FormaturaPage user={auth.user} />} />
             <Route path="/requerimentos" element={<RequerimentosPage user={auth.user} />} />
             <Route path="/requerimentos/:typeId" element={<RequestForm user={auth.user} />} />

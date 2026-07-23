@@ -8,6 +8,7 @@ import { collection, query, orderBy, getDocs, doc, updateDoc, writeBatch, server
 import ManageUnitsModal from '../components/ManageUnitsModal';
 import TacticalAlert from '../components/TacticalAlert';
 import { AppOrganogram } from '../components/AppOrganogram';
+import { ActiveServicesManager } from '../components/ActiveServicesManager';
 
 interface SettingsProps {
   user: User | null;
@@ -18,7 +19,7 @@ const Settings: React.FC<SettingsProps> = ({ user }) => {
   const [usersList, setUsersList] = useState<User[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchTerm, setSearchTerm] = useState('');
-  const [viewState, setViewState] = useState<'main' | 'organogram'>('main');
+  const [viewState, setViewState] = useState<'main' | 'organogram' | 'active-services'>('main');
   
   // Estados para Modais
   const [editingUser, setEditingUser] = useState<User | null>(null);
@@ -62,6 +63,14 @@ const Settings: React.FC<SettingsProps> = ({ user }) => {
     return (
       <div className="max-w-6xl mx-auto py-6">
         <AppOrganogram currentUser={user} onBack={() => setViewState('main')} />
+      </div>
+    );
+  }
+
+  if (viewState === 'active-services') {
+    return (
+      <div className="max-w-6xl mx-auto py-6 px-4">
+        <ActiveServicesManager currentUser={user} onBack={() => setViewState('main')} />
       </div>
     );
   }
@@ -149,6 +158,17 @@ const Settings: React.FC<SettingsProps> = ({ user }) => {
               </div>
               <h4 className="text-navy-950 font-black uppercase text-sm">Organograma e Perfis</h4>
               <p className="text-navy-400 text-[10px] font-bold mt-1">Ver ramização de segurança, permissões e lógicas por página.</p>
+            </button>
+
+            <button 
+              onClick={() => setViewState('active-services')}
+              className="bg-white border border-navy-100 rounded-3xl p-6 shadow-lg relative overflow-hidden group hover:border-navy-600 transition-all text-left animate-fade-in"
+            >
+              <div className="w-12 h-12 bg-blue-50 rounded-xl flex items-center justify-center border border-blue-100 group-hover:border-blue-600/50 transition-colors mb-4">
+                <i className="fas fa-shield-halved text-blue-700 text-xl animate-pulse"></i>
+              </div>
+              <h4 className="text-navy-950 font-black uppercase text-sm">Serviços Ativos</h4>
+              <p className="text-navy-400 text-[10px] font-bold mt-1">Alterar efetivo e viaturas dos serviços ativos no momento.</p>
             </button>
         </div>
       </section>

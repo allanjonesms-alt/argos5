@@ -4,6 +4,7 @@ import { db, handleFirestoreError, OperationType, logAction } from '../firebase'
 import { collection, query, getDocs, orderBy, where, doc, updateDoc, deleteDoc, writeBatch, onSnapshot } from 'firebase/firestore';
 import { User, UserRole, Shift, Unit } from '../types';
 import { ProfileEditor } from '../components/ProfileEditor';
+import { WhatsAppManager } from '../components/WhatsAppManager';
 import { MIGRATED_POLICE_DATA } from '../lib/migratedData';
 import { 
   ChevronLeft, 
@@ -57,6 +58,7 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
   const [isSaving, setIsSaving] = useState(false);
   const [units, setUnits] = useState<Unit[]>([]);
   const [alertMessage, setAlertMessage] = useState<string | null>(null);
+  const [showWhatsappManager, setShowWhatsappManager] = useState(false);
   const hasMergedRef = React.useRef(false);
 
   const canManage = user?.role === UserRole.MASTER || user?.role === UserRole.ADMIN;
@@ -153,15 +155,26 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
       // 1. Fetch all users
       const usersRef = collection(db, 'users');
       const usersSnapshot = await getDocs(query(usersRef, orderBy('nome', 'asc')));
-      const usersData = usersSnapshot.docs.map(doc => {
-        const docData = doc.data() as User;
-        const isDefaultPassword = docData.senha === '@Senha123' || docData.senha === 'admin123';
-        return {
-          ...docData,
-          id: doc.id,
-          primeiro_acesso: !isDefaultPassword
-        };
+      const usersDataRaw = usersSnapshot.docs
+        .map(doc => {
+          const docData = doc.data() as User & { is_session?: boolean };
+          const isDefaultPassword = docData.senha === '@Senha123' || docData.senha === 'admin123';
+          return {
+            ...docData,
+            id: doc.id,
+            primeiro_acesso: !isDefaultPassword
+          };
+        })
+        .filter(u => !u.is_session);
+
+      const userMap = new Map<string, User>();
+      usersDataRaw.forEach(user => {
+        const existing = userMap.get(user.matricula);
+        if (!existing || (user.ord || 0) < (existing.ord || 0) || (existing.ord === 99 && (user.ord || 0) < 99)) {
+          userMap.set(user.matricula, user);
+        }
       });
+      const usersData = Array.from(userMap.values());
 
       // 2. Fetch active shifts
       const shiftsRef = collection(db, 'vtr_services');
@@ -196,7 +209,11 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
       const matriculaTrimmed = newUser.matricula.trim();
       const qCheck = query(collection(db, 'users'), where('matricula', '==', matriculaTrimmed));
       const snapCheck = await getDocs(qCheck);
-      if (!snapCheck.empty) {
+      const duplicate = snapCheck.docs.find(doc => {
+        const data = doc.data();
+        return !data.is_session && data.ord !== 99;
+      });
+      if (duplicate) {
         throw new Error(`Já existe um policial cadastrado com a matrícula ${matriculaTrimmed}.`);
       }
 
@@ -238,8 +255,12 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
       setIsAddingMilitar(false);
       fetchData();
     } catch (err: any) {
-      handleFirestoreError(err, OperationType.WRITE, 'users/create');
       setAlertMessage('Erro ao cadastrar militar: ' + err.message);
+      try {
+        handleFirestoreError(err, OperationType.WRITE, 'users/create');
+      } catch (e) {
+        console.error('Firestore error logged:', e);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -253,7 +274,11 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
       const matriculaTrimmed = updatedUser.matricula.trim();
       const qCheck = query(collection(db, 'users'), where('matricula', '==', matriculaTrimmed));
       const snapCheck = await getDocs(qCheck);
-      const duplicate = snapCheck.docs.find(doc => doc.id !== updatedUser.id);
+      const duplicate = snapCheck.docs.find(doc => {
+        const data = doc.data();
+        const isSessionCopy = data.is_session || data.ord === 99;
+        return doc.id !== updatedUser.id && !isSessionCopy;
+      });
       if (duplicate) {
         throw new Error(`Já existe outro policial cadastrado com a matrícula ${matriculaTrimmed}.`);
       }
@@ -310,8 +335,12 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
       setEditingUser(null);
       fetchData();
     } catch (err: any) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${updatedUser.id}`);
       setAlertMessage('Erro ao atualizar: ' + err.message);
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${updatedUser.id}`);
+      } catch (e) {
+        console.error('Firestore error logged:', e);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -589,6 +618,20 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
     );
   }
 
+  if (showWhatsappManager) {
+    return (
+      <div className="min-h-screen bg-white py-6" id="whatsapp-manager-view">
+        <div className="max-w-7xl mx-auto px-4">
+          <WhatsAppManager 
+            currentUser={user}
+            usersList={usersList}
+            onBack={() => setShowWhatsappManager(false)}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-7xl mx-auto py-8 px-4 sm:px-6">
       {/* Header section with back navigation */}
@@ -612,6 +655,16 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
         
         {/* Action Buttons */}
         <div className="flex gap-2">
+          <button
+            type="button"
+            onClick={() => setShowWhatsappManager(true)}
+            className="bg-emerald-600 hover:bg-emerald-500 text-white border border-emerald-700 rounded-xl px-5 py-3 font-black text-[10px] tracking-widest uppercase transition-all flex items-center justify-center gap-2 shadow-md hover:shadow-lg shadow-emerald-600/10 active:scale-95"
+            id="whatsapp-manager-btn"
+          >
+            <i className="fa-brands fa-whatsapp text-xs"></i>
+            <span>Avisos WhatsApp</span>
+          </button>
+
           {canManage && (
             <button
               onClick={() => setIsAddingMilitar(true)}
@@ -907,6 +960,29 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
                               </div>
                             </div>
                           </div>
+
+                          {/* WhatsApp Click-to-Chat */}
+                          {officer.telefone && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const phoneClean = officer.telefone!.replace(/\D/g, '');
+                                let finalPhone = phoneClean;
+                                if (finalPhone.length === 10 || finalPhone.length === 11) {
+                                  if (!finalPhone.startsWith('55')) {
+                                    finalPhone = '55' + finalPhone;
+                                  }
+                                }
+                                const url = `https://wa.me/${finalPhone}`;
+                                window.open(url, '_blank');
+                              }}
+                              className="w-8 h-8 rounded-xl bg-emerald-50 hover:bg-emerald-500 text-emerald-600 hover:text-white border border-emerald-100 hover:border-emerald-500 transition-all flex items-center justify-center flex-shrink-0 active:scale-95 z-10"
+                              title="Enviar mensagem via WhatsApp"
+                            >
+                              <i className="fa-brands fa-whatsapp text-base"></i>
+                            </button>
+                          )}
                         </div>
 
                         {/* Status Block */}
@@ -1081,11 +1157,34 @@ export const EfetivoPage: React.FC<EfetivoPageProps> = ({ user }) => {
                     Dados Pessoais e Contato
                   </h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div className="bg-navy-50/50 p-3 rounded-xl border border-navy-50">
-                      <span className="text-[8px] font-black text-navy-400 uppercase tracking-widest block flex items-center gap-1">
-                        <Phone size={10} /> Telefone de Contato
-                      </span>
-                      <span className="text-xs font-black text-navy-900 mt-0.5 block">{selectedOfficer.telefone || 'NÃO CADASTRADO'}</span>
+                    <div className="bg-navy-50/50 p-3 rounded-xl border border-navy-50 flex items-center justify-between">
+                      <div>
+                        <span className="text-[8px] font-black text-navy-400 uppercase tracking-widest block flex items-center gap-1">
+                          <Phone size={10} /> Telefone de Contato
+                        </span>
+                        <span className="text-xs font-black text-navy-900 mt-0.5 block">{selectedOfficer.telefone || 'NÃO CADASTRADO'}</span>
+                      </div>
+                      {selectedOfficer.telefone && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const phoneClean = selectedOfficer.telefone!.replace(/\D/g, '');
+                            let finalPhone = phoneClean;
+                            if (finalPhone.length === 10 || finalPhone.length === 11) {
+                              if (!finalPhone.startsWith('55')) {
+                                finalPhone = '55' + finalPhone;
+                              }
+                            }
+                            const url = `https://wa.me/${finalPhone}`;
+                            window.open(url, '_blank');
+                          }}
+                          className="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg text-[10px] font-black uppercase tracking-wider transition-all flex items-center gap-1.5 active:scale-95 shadow-sm"
+                          title="Enviar mensagem via WhatsApp"
+                        >
+                          <i className="fa-brands fa-whatsapp text-xs"></i>
+                          <span>Conversar</span>
+                        </button>
+                      )}
                     </div>
 
                     <div className="bg-navy-50/50 p-3 rounded-xl border border-navy-50">

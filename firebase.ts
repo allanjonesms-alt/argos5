@@ -6,7 +6,7 @@ import firebaseConfig from './firebase-applet-config.json';
 
 // Initialize Firebase SDK
 const app = initializeApp(firebaseConfig);
-export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
+export const db = getFirestore(app, (firebaseConfig as any).firestoreDatabaseId || 'aborda5');
 export const auth = getAuth(app);
 
 export async function logAction(userId: string, userName: string, action: string, details: string, metadata: any = {}) {

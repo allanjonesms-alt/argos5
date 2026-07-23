@@ -115,15 +115,27 @@ const Operators: React.FC<OperatorsProps> = ({ user }) => {
       const q = query(collection(db, 'users'), orderBy('ord', 'asc'));
       const querySnapshot = await getDocs(q);
       
-      const data = querySnapshot.docs.map(doc => {
-        const docData = doc.data() as User;
-        const isDefaultPassword = docData.senha === '@Senha123' || docData.senha === 'admin123';
-        return {
-          ...docData,
-          id: doc.id,
-          primeiro_acesso: !isDefaultPassword // true = liberado/cadastrada, false = pendente
-        };
+      const dataRaw = querySnapshot.docs
+        .map(doc => {
+          const docData = doc.data() as User & { is_session?: boolean };
+          const isDefaultPassword = docData.senha === '@Senha123' || docData.senha === 'admin123';
+          return {
+            ...docData,
+            id: doc.id,
+            primeiro_acesso: !isDefaultPassword // true = liberado/cadastrada, false = pendente
+          };
+        })
+        .filter(u => !u.is_session);
+
+      // Deduplicate by matricula, keeping the one with lowest ord
+      const userMap = new Map<string, User>();
+      dataRaw.forEach(user => {
+        const existing = userMap.get(user.matricula);
+        if (!existing || (user.ord || 0) < (existing.ord || 0) || (existing.ord === 99 && (user.ord || 0) < 99)) {
+          userMap.set(user.matricula, user);
+        }
       });
+      const data = Array.from(userMap.values()).sort((a, b) => (a.ord || 0) - (b.ord || 0));
       setUsersList(data);
       setHasChanges(false);
       await handleAutoMerge(data);
@@ -230,6 +242,7 @@ const Operators: React.FC<OperatorsProps> = ({ user }) => {
       );
 
       setUserToDelete(null);
+      setEditingUser(null);
       fetchUsers();
     } catch (err: any) {
       handleFirestoreError(err, OperationType.DELETE, `users/${userToDelete.id}`);
@@ -276,7 +289,11 @@ const Operators: React.FC<OperatorsProps> = ({ user }) => {
       const matriculaTrimmed = newUser.matricula.trim();
       const qCheck = query(collection(db, 'users'), where('matricula', '==', matriculaTrimmed));
       const snapCheck = await getDocs(qCheck);
-      if (!snapCheck.empty) {
+      const duplicate = snapCheck.docs.find(doc => {
+        const data = doc.data();
+        return !data.is_session && data.ord !== 99;
+      });
+      if (duplicate) {
         throw new Error(`Já existe um policial cadastrado com a matrícula ${matriculaTrimmed}.`);
       }
 
@@ -318,8 +335,12 @@ const Operators: React.FC<OperatorsProps> = ({ user }) => {
       setIsAddingMilitar(false);
       fetchUsers();
     } catch (err: any) {
-      handleFirestoreError(err, OperationType.WRITE, 'users/create');
       setAlertMessage('Erro ao cadastrar militar: ' + err.message);
+      try {
+        handleFirestoreError(err, OperationType.WRITE, 'users/create');
+      } catch (e) {
+        console.error('Firestore error logged:', e);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -333,7 +354,11 @@ const Operators: React.FC<OperatorsProps> = ({ user }) => {
       const matriculaTrimmed = updatedUser.matricula.trim();
       const qCheck = query(collection(db, 'users'), where('matricula', '==', matriculaTrimmed));
       const snapCheck = await getDocs(qCheck);
-      const duplicate = snapCheck.docs.find(doc => doc.id !== updatedUser.id);
+      const duplicate = snapCheck.docs.find(doc => {
+        const data = doc.data();
+        const isSessionCopy = data.is_session || data.ord === 99;
+        return doc.id !== updatedUser.id && !isSessionCopy;
+      });
       if (duplicate) {
         throw new Error(`Já existe outro policial cadastrado com a matrícula ${matriculaTrimmed}.`);
       }
@@ -390,8 +415,12 @@ const Operators: React.FC<OperatorsProps> = ({ user }) => {
       setEditingUser(null);
       fetchUsers();
     } catch (err: any) {
-      handleFirestoreError(err, OperationType.UPDATE, `users/${updatedUser.id}`);
       setAlertMessage('Erro ao atualizar: ' + err.message);
+      try {
+        handleFirestoreError(err, OperationType.UPDATE, `users/${updatedUser.id}`);
+      } catch (e) {
+        console.error('Firestore error logged:', e);
+      }
     } finally {
       setIsSaving(false);
     }
@@ -472,6 +501,7 @@ const Operators: React.FC<OperatorsProps> = ({ user }) => {
             userToEdit={editingUser}
             onSave={handleUpdateUser}
             onCancel={() => setEditingUser(null)}
+            onDelete={setUserToDelete}
             units={units}
             isSaving={isSaving}
           />
@@ -654,6 +684,29 @@ const Operators: React.FC<OperatorsProps> = ({ user }) => {
                         </div>
 
                         <div className="flex items-center gap-2 self-end sm:self-center">
+                          {u.telefone && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const phoneClean = u.telefone!.replace(/\D/g, '');
+                                let finalPhone = phoneClean;
+                                if (finalPhone.length === 10 || finalPhone.length === 11) {
+                                  if (!finalPhone.startsWith('55')) {
+                                    finalPhone = '55' + finalPhone;
+                                  }
+                                }
+                                const url = `https://wa.me/${finalPhone}`;
+                                window.open(url, '_blank');
+                              }}
+                              className="px-3 py-2 bg-emerald-50 hover:bg-emerald-500 text-emerald-600 hover:text-white rounded-xl flex items-center gap-1.5 transition-all border border-emerald-100 hover:border-emerald-500 font-black text-[10px] uppercase tracking-wider shadow-sm active:scale-95"
+                              title="Enviar mensagem via WhatsApp"
+                            >
+                              <i className="fa-brands fa-whatsapp text-xs"></i>
+                              <span>Conversar</span>
+                            </button>
+                          )}
+
                           {canManage && (
                             <div className="flex gap-1.5">
                               <button 
