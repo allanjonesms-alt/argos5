@@ -1,0 +1,14 @@
+--- pages/EscalaRemuneradaPage.tsx
++++ pages/EscalaRemuneradaPage.tsx
+@@ -197,6 +197,11 @@
+       };
+     });
+   }, [escalas, voluntarios, usersList, postos]);
++
++  useEffect(() => {
++    console.log("DEBUG: usersList", usersList);
++    console.log("DEBUG: voluntarios", voluntarios);
++  }, [usersList, voluntarios]);
+ 
+   // Police officer live search
+   const filteredSearchPolicias = useMemo(() => {
